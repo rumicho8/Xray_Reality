@@ -34,15 +34,29 @@
 
 ---
 
-## ⚡ 快速部署与安装
+## 📥 安装与运行
 
-在服务器终端执行主程序：
+> **注意**：请将命令中的 `你的用户名/你的仓库名` 替换为你实际的 GitHub 路径。
 
+### 方式 A：在线极速安装（推荐，不落盘、无文件残留）
+适合一次性部署，执行完毕后当前目录不产生任何多余脚本文件：
 ```bash
-chmod +x install.sh
-./install.sh
+bash <(curl -fsSL "[https://raw.githubusercontent.com/你的用户名/你的仓库名/main/install.sh](https://raw.githubusercontent.com/你的用户名/你的仓库名/main/install.sh)")
 ```
-*(注：执行后通过交互菜单完成模式选择、域名检验、端口配置及证书自动化申请)*
+
+### 方式 B：下载到本地执行（推荐需要长期运维的用户）
+将脚本落盘保存，赋予执行权限，便于后续随时进入管理菜单：
+
+* **使用 curl（推荐）：**
+  ```bash
+  curl -fsSL -o install.sh "[https://raw.githubusercontent.com/你的用户名/你的仓库名/main/install.sh](https://raw.githubusercontent.com/你的用户名/你的仓库名/main/install.sh)" && chmod +x install.sh && ./install.sh
+  ```
+* **使用 wget：**
+  ```bash
+  wget -O install.sh "[https://raw.githubusercontent.com/你的用户名/你的仓库名/main/install.sh](https://raw.githubusercontent.com/你的用户名/你的仓库名/main/install.sh)" && chmod +x install.sh && ./install.sh
+  ```
+
+> **日常管理**：采用方式 B 安装后，后续若需修改端口、查看状态或卸载服务，只需在当前目录执行 `./install.sh` 即可直接唤出交互菜单。
 
 ---
 
