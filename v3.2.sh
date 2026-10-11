@@ -154,7 +154,7 @@ sys_setup_bbr() {
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
         local major_version="${VERSION_ID%%.*}"
-        if [[ "$ID" == "debian" && "$major_version" =~ ^[0-9]+$ && "$major_version" -ge 13 ]]; then
+        if [[ ("$ID" == "debian" && "$major_version" =~ ^[0-9]+$ && "$major_version" -ge 13) || ("$ID" == "ubuntu" && "$major_version" =~ ^[0-9]+$ && "$major_version" -ge 24) ]]; then
             bbr_conf_file="/etc/sysctl.d/99-custom.conf"
             mkdir -p /etc/sysctl.d
             sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null || true
