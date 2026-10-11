@@ -151,34 +151,62 @@ EOF
 sys_setup_bbr() {
     log_info "正在检查网络加速 (BBR) 状态..."
     local bbr_conf_file="/etc/sysctl.conf"
+    local need_migrate=0
+
+    # 1. 确定当前系统规范的目标路径
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
         local major_version="${VERSION_ID%%.*}"
-        if [[ ("$ID" == "debian" && "$major_version" =~ ^[0-9]+$ && "$major_version" -ge 13) || ("$ID" == "ubuntu" && "$major_version" =~ ^[0-9]+$ && "$major_version" -ge 24) ]]; then
+        if [[ "$ID" == "debian" && "$major_version" =~ ^[0-9]+$ && "$major_version" -ge 11 ]] || \
+           [[ "$ID" == "ubuntu" && "$major_version" =~ ^[0-9]+$ && "$major_version" -ge 22 ]]; then
             bbr_conf_file="/etc/sysctl.d/99-custom.conf"
-            mkdir -p /etc/sysctl.d
-            sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null || true
-            sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null || true
+            need_migrate=1
         fi
         log_info "当前系统信息: ${PRETTY_NAME:-Linux} | 目标配置路径: $bbr_conf_file"
     fi
 
-    if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
-        sed -i '/net.core.default_qdisc/d' "$bbr_conf_file" 2>/dev/null || true
-        sed -i '/net.ipv4.tcp_congestion_control/d' "$bbr_conf_file" 2>/dev/null || true
-        echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" >> "$bbr_conf_file"
-        [[ "$bbr_conf_file" == "/etc/sysctl.conf" ]] && sysctl -p >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1
-        log_ok "BBR 网络加速已成功开启。"
-    else
-        log_ok "网络加速 (BBR) 已处于开启状态，跳过配置。"
+    # 2. 状态判定：目标文件是否已存在配置？内存是否已加载？
+    local file_has_bbr=0
+    if [[ -s "$bbr_conf_file" ]] && grep -q "tcp_congestion_control=bbr" "$bbr_conf_file"; then
+        file_has_bbr=1
     fi
+
+    local kernel_has_bbr=0
+    if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
+        kernel_has_bbr=1
+    fi
+
+    # 3. 只有当目标文件已经写好、且内核正在运行 BBR 时，才允许完全跳过
+    if [[ $file_has_bbr -eq 1 && $kernel_has_bbr -eq 1 ]]; then
+        log_ok "网络加速 (BBR) 已处于开启状态且配置文件完整，跳过配置。"
+        return 0
+    fi
+
+    # 4. 执行配置动作（此时清理旧文件是安全的，因为紧接着就会生成新配置）
+    if [[ $need_migrate -eq 1 ]]; then
+        mkdir -p /etc/sysctl.d
+        sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null || true
+        sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null || true
+    fi
+
+    sed -i '/net.core.default_qdisc/d' "$bbr_conf_file" 2>/dev/null || true
+    sed -i '/net.ipv4.tcp_congestion_control/d' "$bbr_conf_file" 2>/dev/null || true
+    echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" >> "$bbr_conf_file"
+
+    # 5. 生效载入
+    if [[ "$bbr_conf_file" == "/etc/sysctl.conf" ]]; then
+        sysctl -p >/dev/null 2>&1 || true
+    else
+        sysctl --system >/dev/null 2>&1 || true
+    fi
+
+    log_ok "BBR 网络加速已成功开启并写入配置。"
 }
 
 sys_clean_apt_cache() {
     log_info "正在清理安装过程中产生的系统垃圾..."
     apt-get autoremove -yqq >/dev/null 2>&1
     apt-get clean -yqq >/dev/null 2>&1
-    rm -rf /var/lib/apt/lists/* 2>/dev/null || true
     log_ok "系统垃圾清理完毕。"
 }
 
@@ -442,7 +470,7 @@ server {
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
-    add_header X-Frame-Options SAMEORIGIN准则 always;
+    add_header X-Frame-Options SAMEORIGIN always;
 
     location / {
         root /var/www/html;
@@ -1068,16 +1096,6 @@ workflow_deploy() {
     [[ "${CTX[mode]}" =~ ^[13]$ ]] && install_pkgs="$install_pkgs nginx socat"
 
     log_info "正在安装模式所需的基础软件..."
-    if grep -Eqi '^ID=.*ubuntu' /etc/os-release 2>/dev/null; then
-        if ! grep -Eq "^\s*deb.*universe" /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null; then
-            log_info "检测到 Ubuntu 环境未激活 universe 源，正在自动补全..."
-            apt-get update -yqq >/dev/null 2>&1
-            apt-get install -yqq software-properties-common >/dev/null 2>&1
-            add-apt-repository -y universe >/dev/null 2>&1
-        fi
-    fi
-    apt-get update -yqq >/dev/null 2>&1
-
     local apt_log="/tmp/apt_install_$$.log"
     CLEANUP_LIST+=("$apt_log")
 
