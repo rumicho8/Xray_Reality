@@ -1,335 +1,279 @@
-# Xray Reality & Hysteria 2 工业级自动化网关引擎 (Industrial Architecture Edition)
+# Xray Reality Automation Engine (Industrial Architecture Edition)
 
-[![Linux Support](https://img.shields.io/badge/OS-Debian%2011%2B%20%7C%20Ubuntu%2020.04%2B-blue?style=flat-square&logo=linux)](https://www.debian.org/)
-[![Kernel](https://img.shields.io/badge/Kernel-TCP%20BBR%20%2B%20FQ-brightgreen?style=flat-square)](https://git.kernel.org/)
-[![Protocol](https://img.shields.io/badge/Protocols-VLESS--Vision--Reality%20%7C%20Hysteria2-orange?style=flat-square)](https://github.com/XTLS/Xray-core)
-[![Web Server](https://img.shields.io/badge/Gateway-Nginx%20Fallback-009639?style=flat-square&logo=nginx)](https://nginx.org/)
-[![License](https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square)](LICENSE)
+<p align="center">
+  <a href="https://github.com/XTLS/Xray-core"><img src="https://img.shields.io/badge/Protocols-VLESS--Vision--Reality%20%7C%20Hysteria2-orange?style=flat-square" alt="Protocol" /></a>
+  <a href="https://nginx.org/"><img src="https://img.shields.io/badge/Gateway-Nginx%20Fallback-009639?style=flat-square&logo=nginx&logoColor=white" alt="Web Server" /></a>
+  <a href="https://letsencrypt.org/"><img src="https://img.shields.io/badge/TLS%20Cert-ECC--256%20Auto--Renew-yellowgreen?style=flat-square&logo=letsencrypt&logoColor=white" alt="TLS Cert" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square" alt="License" /></a>
+</p>
 
-本项目是一套面向 Linux 高并发服务器深度优化的企业级代理自动化编排引擎。底层深度融合 **VLESS + XTLS-Vision + Reality** 核心，创新性实现 **Nginx 动态本地伪装回落**、**Hysteria 2 (QUIC) 单端口 TCP/UDP 协议共存**、**Systemd 内核事件驱动证书热加载** 以及 **Linux 存储配额与垃圾生命周期管理**。
+<p align="center">
+  <a href="https://www.debian.org/"><img src="https://img.shields.io/badge/OS-Debian%2011%2B%20%7C%20Ubuntu%2020.04%2B-blue?style=flat-square&logo=linux&logoColor=white" alt="Linux Support" /></a>
+  <img src="https://img.shields.io/badge/Arch-amd64%20%7C%20arm64-informational?style=flat-square" alt="Architecture" />
+  <img src="https://img.shields.io/badge/Network-IPv4%20%2F%20IPv6%20Dual--Stack-blueviolet?style=flat-square" alt="Dual Stack" />
+  <a href="https://git.kernel.org/"><img src="https://img.shields.io/badge/Kernel-TCP%20BBR%20%2B%20FQ-brightgreen?style=flat-square" alt="Kernel" /></a>
+</p>
 
-项目分为两个独立工程版本：
-* **`v3.0.sh` (Firewall Edition - 全自动防火墙集成版)**：内嵌跨发行版多后端（UFW / Firewalld / nftables / iptables）防火墙驱动，适用于直接暴露在公网、需要自动化网络访问控制的服务器。
-* **`v3.1.sh` (Pure Edition - 纯净网络解耦版)**：剥离主机防火墙规则注入模块，与云平台外部安全组（Cloud Security Group）完全解耦，专为现代公有云拓扑与虚拟化容器环境设计。
+---
+
+> [!TIP]
+> ### 🚀 核心架构全景 (Architecture Overview)
+> **面向生产级 Linux 节点打造的高性能全自动化代理网关部署引擎。**[cite: 1, 2]
+> 方案深度融合了 **VLESS + XTLS-Vision + REALITY**、**Nginx 动态伪装回落网关** 与 **Hysteria 2 双栈端口复用** 协议架构[cite: 1, 2]。
+
+> [!NOTE]
+> ### ⚙️ 系统自适应底座 (Kernel & System Adaptation)
+> * **动态语法探针**：自动感知 Nginx 版本，动态启用 `ssl_reject_handshake` 防主动探测，自适应匹配现代 `http2 on;` 独立语法[cite: 1, 2]。
+> * **Debian 13+ 架构适配**：自动识别发行版主版本号，针对新一代系统将 BBR 配置原子写入 `/etc/sysctl.d/99-custom.conf` 并调用 `sysctl --system`[cite: 1, 2]。
+
+> [!IMPORTANT]
+> ### 🛡️ 状态持久化与系统治理 (Safety & Persistence)
+> * **凭据零丢失**：重装与修改端口时自动回推 X25519 密钥链，客户端已有配置无需重新扫码导入[cite: 1, 2]。
+> * **存储熔断机制**：`journald` 限制 100MB 磁盘配额，开启零日志黑洞策略，全生命周期保障 VPS 磁盘安全[cite: 1, 2]。
 
 ---
 
 ## 📑 目录 (Table of Contents)
-
-- [1. 核心流量拓扑与架构原理](#1-核心流量拓扑与架构原理)
-- [2. v3.0 与 v3.1 深度比对与设计选型](#2-v30-与-v31-深度比对与设计选型)
-- [3. 底层机制与系统自适应详解](#3-底层机制与系统自适应详解)
-  - [3.1 Nginx 核心特性与语法动态探针](#31-nginx-核心特性与语法动态探针)
-  - [3.2 操作系统版本识别与内核 BBR 调优](#32-操作系统版本识别与内核-bbr-调优)
-  - [3.3 凭据生命周期与密钥持久化策略](#33-凭据生命周期与密钥持久化策略)
-  - [3.4 跨模式切换的状态机与物理擦除机制](#34-跨模式切换的状态机与物理擦除机制)
-  - [3.5 存储治理、日志熔断与进程安全底座](#35-存储治理日志熔断与进程安全底座)
-  - [3.6 事件驱动证书热重载与规则原子更新](#36-事件驱动证书热重载与规则原子更新)
-- [4. 三大部署模式特性矩阵](#4-三大部署模式特性矩阵)
-- [5. 环境与端口规范](#5-环境与端口规范)
-- [6. 部署与安装指南](#6-部署与安装指南)
-- [7. 运维管理与生命周期控制](#7-运维管理与生命周期控制)
-- [8. 常见故障排查手册 (FAQ)](#8-常见故障排查手册-faq)
+- [一、 核心配置文件路径清单](#一-核心配置文件路径清单)
+- [二、 服务控制与常用运维命令大全](#二-服务控制与常用运维命令大全)
+- [三、 自动化任务触发时间与调度规划](#三-自动化任务触发时间与调度规划)
+- [四、 路由分流规则库原子化热更新机制剖析](#四-路由分流规则库原子化热更新机制剖析)
+- [五、 脚本全维度对比矩阵 (v3.0.sh vs v3.1.sh)](#五-脚本全维度对比矩阵-v30sh-vs-v31sh)
+- [六、 源码架构与核心模块逐层详解](#六-源码架构与核心模块逐层详解)
+  - [1. LAYER 1: 运行时基座与进程互斥安全体系](#1-layer-1-运行时基座与进程互斥安全体系)
+  - [2. LAYER 2: 基础设施策略与防火墙自适应引擎](#2-layer-2-基础设施策略与防火墙自适应引擎)
+  - [3. LAYER 3: 业务组件生命周期驱动](#3-layer-3-业务组件生命周期驱动)
+  - [4. LAYER 4: 业务交互编排与状态机对齐](#4-layer-4-业务交互编排与状态机对齐)
+  - [5. LAYER 5: CLI 调度入口与菜单驱动](#5-layer-5-cli-调度入口与菜单驱动)
+- [七、 常见故障排查手册 (Troubleshooting)](#七-常见故障排查手册-troubleshooting)
 
 ---
 
-## 1. 核心流量拓扑与架构原理
+## 一、 核心配置文件路径清单
 
-系统在单一入站公网端口（默认 `443`）上实现传输层多路复用，通过 Linux 内核 Socket 机制对 TCP 与 UDP 进行分流处理：
+系统遵循 Linux FHS 工业规范，所有组件文件按功能职责离散收敛管理，权限严格遵循最小权限原则：
 
-```text
-                                  [ 公网客户端入站流量 (Port: 443) ]
-                                                   │
-                   ┌───────────────────────────────┴───────────────────────────────┐
-                   ▼ (TCP 协议流)                                                   ▼ (UDP 协议流 - 仅模式 3)
-      【 Xray-Core Gateway 】                                              【 Hysteria 2 Server 】
-   VLESS + XTLS-Vision + Reality                                           QUIC 传输加速引擎 (Port: 443)
-                   │                                                               │
-         ┌─────────┴─────────┐                                                     │
-         ▼ (通过 Reality 认证) ▼ (未携带/非法密钥探测)                                      │
-   [ Freedom Direct ]   [ 透明回落 Fallback ]                                      ▼ (HTTP 伪装代理)
-   规则路由出站匹配:        127.0.0.1:8443                                      Proxy: 127.0.0.1:8444
-   - 广告/CN IP 阻断           │                                                           │
-   - 境外公网直连放行           ▼                                                           │
-                   【 Nginx 本地安全伪装站点 】 ◄──────────────────────────────────────────────┘
-                    ├─► SNI 合法匹配  ──► 返回本地现代化 3D 静态站点
-                    └─► 非法/未授权探测 ──► 动态触发 ssl_reject_handshake 阻断握手 (TCP RST)
-```
-
-### 流量处理核心机制：
-1. **TCP/UDP 单端口复用**：操作系统在传输层根据五元组（源IP、源端口、目的IP、目的端口、传输层协议）区分会话。Xray 绑定 `0.0.0.0:443 (TCP)`，Hysteria2 绑定 `0.0.0.0:443 (UDP)`，实现单一端口对外提供双重协议通道。
-2. **Reality 握手防探测验证**：客户端通过 X25519 椭圆曲线算法生成认证信息。Xray 服务端使用自身私钥与指定的 `shortId` 进行校验。通过验证则进入代理通道；若探测者直接发起扫描或使用非授权 SNI，Xray 将 TLS 连接通过内存回落至 `127.0.0.1:8443`（Nginx）。
-3. **Nginx 主动防御层**：Nginx 监听本地回路地址，对非法流量实施双层过滤：域名匹配则展示逼真的 3D 伪装站点；域名不匹配或直接扫描 IP 时，由内核级 TLS 探针直接拒绝握手，阻断主动特征探测。
-
----
-
-## 2. v3.0 与 v3.1 深度比对与设计选型
-
-两个脚本在业务逻辑实现上完全同源，核心差异在于**对 Linux 系统网络过滤子系统（防火墙）的干预程度与权限边界**：
-
-| 比对维度 | `v3.0.sh` (Firewall Edition) | `v3.1.sh` (Pure Edition) | 原理与设计影响 |
+| 业务组件 | 绝对路径 / 目录 | 文件用途说明 | 推荐安全权限 |
 | :--- | :--- | :--- | :--- |
-| **版本标识 (Layer 1)** | `v3.0-Industrial-Firewall` | `v3.1-Industrial-Pure` | 明确标识构建目标与网络治理范围。 |
-| **全局上下文状态 (`CTX`)** | 包含 `[old_port]` 与 `[fw_backend]` | 移除 `old_port` 与 `fw_backend` | `v3.0` 需跟踪原端口用于平滑迁移回收；`v3.1` 保持轻量状态机。 |
-| **防火墙后端自动探针** | 自动适配 UFW / Firewalld / nftables / iptables | **无任何防火墙探测** | `v3.0` 可自适应宿主机安装的防火墙服务并动态下发规则。 |
-| **nftables 原生链隔离** | 独占 `inet xray_gateway` 独立命名表 | **无** | `v3.0` 使用独立表空间与 Handle 原子操作，杜绝影响宿主机其他业务规则。 |
-| **双栈规则维护** | 同步操作 IPv4 (`iptables`) 与 IPv6 (`ip6tables`) | **无** | `v3.0` 确保双栈网络的入站规则保持严格对称。 |
-| **端口迁移安全机制** | 检测到端口变更时，自动下发 `deny` 销毁旧端口放行 | **无** | `v3.0` 防止由于多次变更配置而在防火墙上遗留无效开放端口。 |
-| **传输层协议细粒度控制** | 模式 1/2 显式阻断 UDP，模式 3 显式放行 UDP | **不干预** 任何系统传输层规则 | `v3.0` 践行网络安全最小暴露面原则。 |
-| **卸载与系统回退策略** | 自动回收放行端口，物理清退 nftables 配置包含与表 | 仅注销 Systemd 服务、删除配置与二进制文件 | `v3.1` 确保卸载过程不会意外冲刷用户原本的复杂防火墙规则。 |
-| **最佳部署场景** | **传统 VPS / 物理服务器 / 无外部安全组的 IDC 机器** | **AWS EC2 / Oracle Cloud / GCP / 阿里云 / 腾讯云** | `v3.1` 杜绝系统内部防火墙与云厂商 Web 控制台安全组发生规则冲突。 |
+| **Xray Core** | `/usr/local/bin/xray` | Xray 核心主执行程序[cite: 1, 2] | `0755 (root:root)`[cite: 1, 2] |
+| **Xray 配置** | `/usr/local/etc/xray/config.json` | VLESS-Reality、出站路由、DNS 核心主配置文件[cite: 1, 2] | `0600 (root:root)`[cite: 1, 2] |
+| **Xray 规则库**| `/usr/local/share/xray/` | 存储 `geoip.dat` 与 `geosite.dat` 规则数据库[cite: 1, 2] | `0644 (root:root)` |
+| **Hysteria 2** | `/usr/local/bin/hysteria` | Hysteria 2 官方二进制执行程序[cite: 1, 2] | `0755 (root:root)`[cite: 1, 2] |
+| **Hysteria 配置** | `/etc/hysteria/config.yaml` | QUIC 传输参数、端口、密码与回落路由配置[cite: 1, 2] | `0600 (root:root)`[cite: 1, 2] |
+| **Nginx 主配置** | `/etc/nginx/nginx.conf` | Web 主进程优化、SSL 会话缓存与事件驱动模型[cite: 1, 2] | `0644 (root:root)` |
+| **Nginx 站点配置** | `/etc/nginx/sites-available/xray`<br>`/etc/nginx/sites-enabled/xray` | 8443 伪装站点、80 证书校验与 8444 HTTP 回落虚拟主机[cite: 1, 2] | `0644 (root:root)` |
+| **TLS 证书资产** | `/etc/nginx/ssl/${domain}_ecc.cer`<br>`/etc/nginx/ssl/${domain}_ecc.key` | Let's Encrypt EC-256 完整证书链及独立私钥[cite: 1, 2] | `0600 (root:root)` |
+| **伪装网站根目录** | `/var/www/html/` | 本地真实解压的 3D 伪装静态网页资源目录[cite: 1, 2] | `0755 (www-data:www-data)`[cite: 1, 2] |
+| **ACME 核心工具** | `/root/.acme.sh/acme.sh` | 证书生命周期管理、自动申请与无日志静默续签工具[cite: 1, 2] | `0700 (root:root)` |
+| **自动化运维脚本** | `/usr/local/etc/xray-script/` | 存放 `update-dat.sh` 与 `hysteria-cert-restart.sh`[cite: 1, 2] | `0755 (root:root)`[cite: 1, 2] |
+| **系统日志限额策略** | `/etc/systemd/journald.conf.d/99-prophet.conf` | Systemd 日志 100MB 熔断限额与 7 天保留策略[cite: 1, 2] | `0644 (root:root)` |
+| **内核网络优化配置** | `/etc/sysctl.d/99-custom.conf` (Debian 13+)<br>`/etc/sysctl.conf` (其他发行版) | TCP BBR 拥塞控制与 FQ 队列调度优化参数[cite: 1, 2] | `0644 (root:root)` |
+| **Nftables 防火墙** | `/etc/nftables.d/xray.nft` (仅 v3.0) | 独立维护的 `inet xray_gateway` 网络端口规则快照[cite: 1] | `0600 (root:root)` |
 
 ---
 
-## 3. 底层机制与系统自适应详解
+## 二、 服务控制与常用运维命令大全
 
-### 3.1 Nginx 核心特性与语法动态探针
-为解决不同发行版软件源中 Nginx 版本跨度大（1.18 ~ 1.26+）导致的语法报错，脚本引入了**语法探针检测技术**：在临时目录生成 `/tmp/ngx_probe.conf` 并调用 `nginx -t -c` 捕获底层校验返回值。
+系统所有底层组件均由原生 Systemd 纳管，日常管理可直接调用以下标准指令：
 
-```text
-[ 安装 Nginx ] ──► [ 生成 /tmp/ngx_probe.conf ] ──► [ nginx -t 语法探测 ]
-                                                            │
-         ┌──────────────────────────────────────────────────┴──────────────────────────────────────────────────┐
-         ▼ (Probe 1: ssl_reject_handshake 测试)                                                                 ▼ (Probe 2: http2 语法测试)
-   ┌───────────┴───────────┐                                                                             ┌───────────┴───────────┐
-   ▼ (返回码 0: 支持)        ▼ (返回码非 0: 不支持)                                                         ▼ (返回码 0: 现代语法)     ▼ (返回码非 0: 传统语法)
-[ 启用默认 Server 握手阻断 ]   [ 略过指令，降级为常规 403 ]                                                     [ 注入独立 http2 on; 指令 ] [ 注入 listen ... http2 兼容指令 ]
+### 1. 服务启停、重载与状态查看
+```bash
+# -------------------- Xray Core --------------------
+systemctl restart xray              # 重启 Xray 核心进程
+systemctl reload xray 2>/dev/null || systemctl restart xray
+systemctl stop xray                 # 停止 Xray 服务
+systemctl status xray               # 查看 Xray 运行状态与最近日志
+
+# -------------------- Nginx 伪装网关 (模式 1/3) --------------------
+systemctl reload nginx              # 平滑重载 Nginx 配置 (零停机)
+systemctl restart nginx             # 完整重启 Nginx 服务
+systemctl status nginx              # 查看 Nginx 运行状态
+nginx -t                            # 校验当前 Nginx 配置文件语法是否合法
+
+# -------------------- Hysteria 2 (模式 3) --------------------
+systemctl restart hysteria-server   # 重启 Hysteria 2 UDP 服务
+systemctl stop hysteria-server      # 停止 Hysteria 2 服务
+systemctl status hysteria-server    # 查看 Hysteria 2 连接与端口状态
+
+# -------------------- 证书热重载事件监控 (模式 3) --------------------
+systemctl status hysteria-cert-watcher.path      # 查看内核文件路径监听单元状态
+systemctl restart hysteria-cert-watcher.path     # 重启文件监听事件单元
 ```
 
-* **`ssl_reject_handshake` 探针**：Nginx 1.19.4+ 引入的防御特性。校验通过后，脚本将在 `127.0.0.1:8443` 注入 `server_name _; ssl_reject_handshake on;`。当遭遇扫描器使用 IP 暴力探测或未携带正确 SNI 握手时，Nginx 在 TLS 握手初期直接终止会话，断开 TCP 连接，不返回任何证书，杜绝证书指纹泄露。
-* **`http2` 语法兼容探针**：Nginx 1.25.1 起废弃了 `listen ... http2;` 语法，改为独立的 `http2 on;`。探针机制自适应当前环境语法，彻底杜绝跨版本部署时报 `the "http2" directive is deprecated` 或配置加载失败的缺陷。
-
-### 3.2 操作系统版本识别与内核 BBR 调优
-脚本通过解构 `/etc/os-release` 获取发行版 ID 与内核大版本号，根据 Linux 演变逻辑执行精准的配置路径注入：
-* **Debian 13+ (Trixie) 路径自适应**：
-  从 Debian 13 开始，官方逐步废弃向 `/etc/sysctl.conf` 直接写入全局参数的旧习惯，推荐由 `systemd-sysctl` 统一接管 `/etc/sysctl.d/*.conf`。脚本检测到系统为 Debian 13+ 时，会自动清理旧文件中的历史配置，将参数独立注入至 `/etc/sysctl.d/99-custom.conf`，并执行 `sysctl --system` 原子重载。
-* **通用发行版路径**：对 Debian 11/12 及 Ubuntu，参数平滑写入 `/etc/sysctl.conf` 并调用 `sysctl -p`。
-* **参数安全幂等**：注入前调用 `sed -i` 清理旧参数，随后写入：
-  $$\text{net.core.default\_qdisc} = \text{fq}$$
-  $$\text{net.ipv4.tcp\_congestion\_control} = \text{bbr}$$
-  确保即使高延迟恶劣网络环境下仍能保持吞吐量最优。
-
-### 3.3 凭据生命周期与密钥持久化策略
-在生产运维中，更换端口或重装系统服务不应导致客户端凭据频繁失效。脚本建立了严格的凭据保护与复用规则：
-
-```text
-[ 触发配置生成 ] ──► 检测 /usr/local/etc/xray/config.json 是否存在？
-                                │
-               ┌────────────────┴────────────────┐
-               ▼ (存在已有配置文件)                ▼ (不存在 / 初次全新安装)
-      [ jq 提取 UUID / priv_key / short_id ]   [ 动态生成全新凭据 ]
-      [ x25519 -i 反向推导 public_key ]        - xray uuid 生成 UUID
-               │                               - openssl 生成 short_id
-               │                               - x25519 生成密钥对
-               └────────────────┬────────────────┘
-                                ▼
-                   [ 组装写入最终 config.json ]
-        (结论: 节点重配/换端口时，客户端节点信息完全无需修改)
+### 2. 实时日志排查 (基于 journalctl)
+```bash
+journalctl -u xray -f               # 实时追踪 Xray 运行日志与错误输出
+journalctl -u nginx -f              # 实时追踪 Nginx 访问与握手日志
+journalctl -u hysteria-server -f    # 实时追踪 Hysteria 2 QUIC 握手与连接日志
+journalctl -u hysteria-cert-watcher.service -e   # 查看证书更新自动重载执行记录
 ```
 
-* **Xray Reality 凭据绝对保持**：
-  配置生成模块优先调用 `jq` 读取旧配置的客户端 `id`、`privateKey` 与 `shortIds`。若私钥存在，通过 `$XRAY_BIN x25519 -i "$priv"` 反向推导出公钥。**只要服务器配置文件存在，无论是更换端口还是重新执行部署，核心认证凭据完全不变，已导出的客户端节点永久有效。**
-* **Hysteria 2 密码安全轮替**：
-  作为高强度对称认证协议，模式 3 部署时会通过 `openssl rand -hex 16` 为 Hysteria 2 重新生成 32 位的强随机密码，降低长期未维护带来的凭据泄露风险。
-* **ECC 证书智能复用与频次保护**：
-  执行证书申请前，优先校验 `/etc/nginx/ssl/${domain}_ecc.cer` 是否存在且文件大小非空。若有效则直接挂载至 Nginx，避免重复向 Let's Encrypt 发起签发请求，规避每周 5 次的申请频率限制（Rate Limit）。
+### 3. 手动触发自动化维护任务
+```bash
+# 手动触发分流规则原子更新
+bash /usr/local/etc/xray-script/update-dat.sh
+# 或通过 Systemd 触发
+systemctl start xray-dat.service
 
-### 3.4 跨模式切换的状态机与物理擦除机制
-脚本内部实现了严格的配置模式对齐函数 `workflow_align_modes`。当用户在不同架构间切换时，未被选中的组件将经历物理级卸载，杜绝“孤儿进程”与配置污染：
-* **从模式 3 切换至模式 1/2**：
-  自动调用 `driver_hysteria_purge`，停止并注销 `hysteria-server.service`、`hysteria-cert-watcher.path` 及关联任务，物理删除 `/usr/local/bin/hysteria` 二进制文件与 `/etc/hysteria` 目录，彻底释放对应的 UDP 端口监听。
-* **从模式 1/3 切换至模式 2 (纯净直连)**：
-  模式 2 无需域名与本地 Web 服务。脚本将：
-  1. 调用 `driver_cert_purge` 注销 acme 定时任务，抹除 `/root/.acme.sh` 及 SSL 证书，清理 Crontab 与 `.bashrc` 环境变量；
-  2. 调用 `driver_nginx_purge_package`，停止服务并执行 `apt-get purge -yqq nginx nginx-common socat`，物理删除 `/etc/nginx`、`/var/www`、`/var/log/nginx`。
-  系统网络与进程状态彻底恢复至干净的裸代理核心基线。
-
-### 3.5 存储治理、日志熔断与进程安全底座
-* **Systemd 日志限额熔断**：针对部分 VPS 磁盘容量极小（$\le 10\text{GB}$）的痛点，在 `/etc/systemd/journald.conf.d/99-prophet.conf` 中固化配置：
-  ```ini
-  [Journal]
-  SystemMaxUse=100M        # 系统日志最大磁盘配额上限 100MB
-  MaxRetentionSec=7day     # 日志最长留存周期 7 天，过期自动轮转
-  ForwardToSyslog=no       # 关闭冗余日志向 syslog 写入，防止双重占用
-  ```
-* **静默证书签发与黑洞策略**：全局设置 `LE_NO_LOG=1`、`LE_LOG_FILE='/dev/null'` 与 `DEBUG=0`，并同步固化至 `/root/.acme.sh/account.conf`，彻底关闭 acme.sh 冗长详细的调试日志。
-* **运行时栈垃圾回收 (`CLEANUP_LIST`)**：
-  脚本创建的所有临时解压目录（`/tmp/web_temp_*`、`/tmp/xray_build_*`、`/tmp/hy2_*`）和探针脚本均压入垃圾回收数组。脚本绑定操作系统底层信号：
-  ```bash
-  trap 'cleanup_resources' EXIT
-  trap 'cleanup_resources; exit 130' INT
-  trap 'cleanup_resources; exit 143' TERM
-  ```
-  无论是正常运行结束、用户按下 `Ctrl+C` 强退，还是被系统守护进程中断，临时碎片均会被全量清除。
-* **排他并发保护锁 (`flock`)**：
-  采用文件描述符追加模式与非阻塞排他锁：`exec 9>>"$LOCK_FILE"; flock -n 9`。若并发触发执行，新进程将立即识别活动 PID 并报错退出，杜绝多实例并发写入破坏系统配置文件。
-
-### 3.6 事件驱动证书热重载与规则原子更新
-* **Systemd.path 内核事件监听**：
-  传统的定时轮询重启容易打断正常通信。本套件部署 `hysteria-cert-watcher.path`，利用 Linux 内核级 `inotify` 机制监视证书文件。当 `acme.sh` 签发新证书写盘时，即刻激活 `hysteria-cert-watcher.service`。配合 `hysteria-cert-restart.sh` 中的文件锁防抖及 `openssl x509` 完整性校验循环，平滑通知 Nginx `reload` 并重启 Hysteria 2，达成零感知证书热更新。
-* **路由数据库原子下载与热替换**：
-  每周一 03:00 (SGT) 执行更新，预先拉取最新的 `geoip.dat` 与 `geosite.dat` 至临时文件。通过两重严密校验：
-  1. 文件体积完整性校验：文件大小必须 $\ge 500\text{KB}$，杜绝因网络阻断下载到 404 错误页；
-  2. 二进制一致性校验：调用 `cmp -s` 比对哈希。
-  仅当规则库出现实质变更时才进行 `mv -f` 原子覆盖并触发 `systemctl restart xray`，保证线上服务高可用。
+# 手动触发证书强制续签检查
+/root/.acme.sh/acme.sh --cron --home /root/.acme.sh
+# 或通过 Systemd 触发
+systemctl start xray-acme.service
+```
 
 ---
 
-## 4. 三大部署模式特性矩阵
+## 三、 自动化任务触发时间与调度规划
 
-```text
-       ┌─────────────── 模式 1: Web 回落模式 (最稳定/自建站) ───────────────┐
-       │ - 拥有独立域名并解析至 VPS                                         │
-       │ - 部署 Nginx 现代化 3D 伪装站点                                    │
-       │ - 外部探测呈现合法 HTTPS 网页，提供极高的抗封锁能力                  │
-       └───────────────────────────────────────────────────────────────────┘
-       ┌─────────────── 模式 2: 纯净直连模式 (最轻量/免域名) ───────────────┐
-       │ - 无需自有域名，借用大厂 SNI (如 www.apple.com) 握手                │
-       │ - 物理拔除 Nginx 与 Web 站点，系统资源开销降至最低                  │
-       │ - 节点信息支持 IPv4 / IPv6 双栈独立生成与二维码展示                 │
-       └───────────────────────────────────────────────────────────────────┘
-       ┌─────────────── 模式 3: 全能共存模式 (双协议栈/全能) ───────────────┐
-       │ - 兼具模式 1 的完整 Web 回落伪装架构                               │
-       │ - 同一端口 (TCP/UDP) 额外挂载 Hysteria 2 协议                      │
-       │ - 提供 TCP (Reality) 与 UDP (QUIC) 双通道互备，无惧运营商 QoS 干扰 │
-       └───────────────────────────────────────────────────────────────────┘
-```
+脚本淘汰了不可靠的传统 Crontab 计划任务，全面引入 **Systemd Timer 高精度定时器**，具备原生持久化追踪（`Persistent=true`，关机错过开机立即补跑）与防碰撞随机延迟（`RandomizedDelaySec`）[cite: 1, 2]：
 
-| 功能指标 | 模式 1：Web 回落模式 | 模式 2：纯净直连模式 | 模式 3：全能共存模式 |
-| :--- | :--- | :--- | :--- |
-| **自有域名依赖** | **必须** (A / AAAA 解析) | **无需** (借用公网大厂域名) | **必须** (A / AAAA 解析) |
-| **Xray 入站协议** | VLESS + Vision + Reality | VLESS + Vision + Reality | VLESS + Vision + Reality |
-| **辅助协议栈** | 无 | 无 | **Hysteria 2 (QUIC)** |
-| **端口复用特性** | 独占业务端口 (TCP) | 独占业务端口 (TCP) | **TCP/UDP 单端口双栈复用** |
-| **本地伪装 Web 站** | 本地 Nginx 3D 网页 (8443) | 无 (流量直接出站) | 本地 Nginx 双端口回落 (8443/8444) |
-| **TLS 证书依赖** | 自动申请 Let's Encrypt ECC | 无需申请证书 | 自动申请 Let's Encrypt ECC |
-| **抗审查防御等级** | ⭐⭐⭐⭐⭐ (极高) | ⭐⭐⭐⭐ (高) | ⭐⭐⭐⭐⭐ (极高) |
-| **适用网络场景** | 日常主力翻墙、防封锁要求高 | 临时快速部署、无域名资源 | 弱网恶劣环境、高丢包、多重网络备用 |
-
----
-
-## 5. 环境与端口规范
-
-### 5.1 操作系统与架构支持
-* **操作系统支持**：
-  * **Debian**：11 (Bullseye) / 12 (Bookworm) / **13 (Trixie，已针对 `/etc/sysctl.d/` 完成原生适配)**
-  * **Ubuntu**：20.04 / 22.04 / 24.04 LTS
-* **CPU 体系架构**：
-  * `amd64` (`x86_64`)
-  * `arm64` (`aarch64` / `arm64-v8a`)
-* **硬件最低配置**：
-  * CPU: 1 Core | 内存: 512MB RAM | 磁盘可用空间: $\ge 1\text{GB}$
-
-### 5.2 端口规划与占用说明
-| 端口号 | 传输协议 | 暴露属性 | 占用服务 | 功能说明 |
+| 定时器单元名称 | 关联执行服务 | 触发调度周期与具体时间 | 随机延迟 (Jitter) | 任务行为与逻辑 |
 | :--- | :--- | :--- | :--- | :--- |
-| **`443`** *(默认)* | TCP | **公网暴露** | Xray Core | Reality 外部入站统一入口（可自定义） |
-| **`443`** *(默认)* | UDP | **公网暴露** | Hysteria 2 | 仅在模式 3 启用，与 TCP 共用同一端口号 |
-| **`80`** | TCP | **公网暴露** | Nginx | HTTP 301 强制跳转与 ACME Webroot 续签验证 |
-| **`8443`** | TCP | **本地监听** | Nginx | Reality 未认证流量与普通 HTTPS 回落终点 |
-| **`8444`** | TCP | **本地监听** | Nginx | 仅在模式 3 启用，用于 Hysteria 2 认证失败时 HTTP 伪装回落 |
+| **`xray-acme.timer`**[cite: 1, 2] | `xray-acme.service`[cite: 1, 2] | **每天 02:00:00 (Asia/Singapore)**[cite: 1, 2]<br>`OnCalendar=*-*-* 02:00:00`[cite: 1, 2] | **5 分钟**[cite: 1, 2]<br>(`RandomizedDelaySec=5m`)[cite: 1, 2] | 调用 acme.sh 扫描服务器内所有证书，临期 30 天内自动触发续签并平滑重载 Nginx[cite: 1, 2]。 |
+| **`xray-dat.timer`**[cite: 1, 2] | `xray-dat.service`[cite: 1, 2] | **每周一 03:00:00 (Asia/Singapore)**[cite: 1, 2]<br>`OnCalendar=Mon *-*-* 03:00:00`[cite: 1, 2] | **10 分钟**[cite: 1, 2]<br>(`RandomizedDelaySec=10m`)[cite: 1, 2] | 调用 `update-dat.sh` 从 Loyalsoldier 上游拉取最新的中国大陆 IP/域名分流规则库[cite: 1, 2]。 |
+| **`hysteria-cert-watcher.path`**[cite: 1, 2] | `hysteria-cert-watcher.service`[cite: 1, 2] | **实时内核事件触发**<br>(`PathChanged` 监听证书和密钥)[cite: 1, 2] | **防抖排他锁 (10s 轮询)**[cite: 1, 2] | 当监测到 `.cer` 或 `.key` 文件落盘变动时，校验完整性并毫秒级重载 Nginx 与 Hysteria2[cite: 1, 2]。 |
 
-> [!IMPORTANT]
-> 服务器的 `80`、`8443` 与 `8444` 端口已被本地基础设施独占。部署时，**业务监听端口严禁配置为 80、8443 或 8444**，否则交互检查程序将拦截并拒绝执行。
+> **时区统一声明**：定时器显式绑定 `Asia/Singapore`（与北京时间 UTC+8 保持绝对同步），避免因 VPS 采用 UTC、EST 等各异的系统时区导致任务在业务高峰期意外触发[cite: 1, 2]。
 
 ---
 
-## 6. 部署与安装指南
+## 四、 路由分流规则库原子化热更新机制剖析
 
-### 6.1 脚本选型与执行
-根据服务器所属的网络环境，选择对应版本的脚本进行部署：
+位于 `/usr/local/etc/xray-script/update-dat.sh` 的分流规则维护脚本采用了工业级**原子写入与防雪崩三重防护体系**，彻底解决了网络中断导致空文件覆盖、服务频繁震荡及全球并发惊群效应[cite: 1, 2]：
 
-```bash
-# 场景 A: 传统裸机、独立服务器或无上层安全组的 VPS (推荐内置防火墙闭环)
-chmod +x v3.0.sh
-./v3.0.sh
-
-# 场景 B: AWS、GCP、Oracle Cloud、阿里云、腾讯云等自带 Web 控制台安全组的实例
-chmod +x v3.1.sh
-./v3.1.sh
+```text
+               [ 触发更新: update-dat.sh ]
+                            │
+              获取非阻塞排他文件锁 (flock -n 9) ──► [失败] ──► 退出 (防止并发冲突)
+                            │ [成功]
+             下载最新规则至临时文件 (${file}.new)
+                            │
+               [ 校验 1: 下载状态与文件大小 ]
+               体积是否 >= 500KB (512,000 bytes) ?
+                  ├── 否 ──► 判定源站异常/下载截断 ──► 清理临时文件并退出
+                  └── 是 ──► 进入下一步
+                            │
+               [ 校验 2: 二进制哈希内容比对 ]
+               cmp -s "${file}.new" "${file}" ?
+                  ├── 一致 ──► 规则无更新 ──► 清理临时文件，结束 (不重启服务)
+                  └── 变更 ──► 进入原子替换
+                            │
+               [ 原子替换: POSIX VFS mv -f ]
+               利用 Linux 内核原子重命名覆盖生产文件
+                            │
+               [ 服务热载: 条件触发 ]
+               标记 changed=1 ──► 执行 systemctl restart xray ──► 释放文件锁
 ```
 
-### 6.2 交互配置流程分解
-1. **模式选择**：按需输入 `1`（Web 回落）、`2`（纯净直连）或 `3`（全能共存）。
-2. **域名校验 (模式 1 & 3)**：
-   * 输入您的域名，系统将自动发起双栈探针（优先调用 Cloudflare DoH，备用系统 `getent` 底层库），比对本机出口 IPv4/IPv6 与域名的当前解析记录。若解析尚未生效，终端将显示醒目的红色预警。
-3. **端口设定**：
-   * 输入业务端口（直接回车默认 `443`）。脚本自动扫描系统的 `ss` 套接字表，若目标端口已被占用将提示重新输入。
-4. **证书验证方式 (模式 1 & 3)**：
-   * **DNS API 验证 (推荐)**：支持 Cloudflare（输入 API Token 与 Zone ID）或 Namesilo（输入 API Key）。通过 DNS 记录自动解析，验证过程无感，原生支持通配符。
-   * **HTTP Webroot 验证**：依赖 Nginx 80 端口验证，在 `/etc/nginx/sites-enabled/` 动态注入验证块，无需中断现有 Web 服务。
-5. **证书颁发环境**：
-   * `Production`：生产环境，签发正式信任的 Let's Encrypt 证书。
-   * `Staging`：测试环境，无签发频次限制，供初次配置排查故障使用。
+### 核心实现原理：
+1. **进程级防并发锁**：`exec 9> /var/lock/xray-dat.lock; flock -n 9 || exit 0`，保证同一时刻仅有一个更新进程在运行[cite: 1, 2]。
+2. **截断熔断保护 (`f_size >= 512000`)**：GitHub Release 在遭遇限流或网络震荡时可能返回几百字节的 404 HTML。脚本强制判断新规则体积必须大于 500KB，避免损坏的空文件替换生产路由库导致 Xray 启动崩溃[cite: 1, 2]。
+3. **内容差量静默比对 (`cmp -s`)**：采用字节级比对。如果远程规则与本地规则完全一致，脚本直接销毁临时文件，**完全不触发服务重启**，保障代理连接长久在线[cite: 1, 2]。
+4. **POSIX 原生原子覆盖 (`mv -f`)**：基于 Linux 文件系统 Inode 重命名机制，替换瞬间对 Xray 读操作无任何阻塞，杜绝中间态[cite: 1, 2]。
 
 ---
 
-## 7. 运维管理与生命周期控制
+## 五、 脚本全维度对比矩阵 (v3.0.sh vs v3.1.sh)
 
-### 7.1 服务状态与实时日志排查
-```bash
-# 查看 Xray 状态与实时日志
-systemctl status xray
-journalctl -u xray -f -n 50
+两个脚本均具备完整的协议功能与运行时安全底座，核心区别在于**主机网络层是否闭环接管防火墙**[cite: 1, 2]：
 
-# 查看 Nginx 状态与配置热加载
-systemctl status nginx
-nginx -t && systemctl reload nginx
-
-# 查看 Hysteria 2 状态 (仅模式 3)
-systemctl status hysteria-server
-journalctl -u hysteria-server -f -n 50
-
-# 查看证书事件监视器状态 (仅模式 3)
-systemctl status hysteria-cert-watcher.path
-```
-
-### 7.2 自动化任务与证书状态审查
-进入脚本交互菜单，选择 `3. 查看定时任务+证书状态`，或直接执行底层运维命令：
-```bash
-# 查看证书续签及规则数据库自动更新定时器
-systemctl list-timers --all | grep -E "xray-acme|xray-dat"
-
-# 查看 acme.sh 已签发证书列表与有效期
-/root/.acme.sh/acme.sh --list --home /root/.acme.sh
-```
-
-### 7.3 干净卸载与环境回收
-在终端运行脚本并选择 `2. 卸载服务`：
-1. **业务组件完全注销**：停止并注销所有相关 Systemd 单元（`xray`、`hysteria-server`、`hysteria-cert-watcher`、`xray-acme`、`xray-dat`），删除二进制文件、站点目录与配置目录。
-2. **防火墙规则回收 (`v3.0.sh` 独占)**：自动检索当前运行端口，删除对应的 TCP/UDP 与 80 端口放行规则，抹除 nftables 中的 `inet xray_gateway` 独立规则表。
-3. **焦土式依赖清理 (交互式可选)**：系统将询问是否彻底卸载系统工具（`nginx`、`socat`、`jq`、`qrencode`、`unzip`）。确认后将调用 `apt-get purge` 进行清退，并自动执行系统垃圾清理；同时保留已调优的内核 BBR 参数与 Systemd 日志限额策略。
+| 对比维度 / 机制特征 | `v3.0.sh` (Firewall 深度集成版)[cite: 1] | `v3.1.sh` (Pure 纯净解耦版)[cite: 2] |
+| :--- | :--- | :--- |
+| **设计定位** | **自带防火墙闭环管理**，适合直接暴露公网的物理裸机、独立服务器或无上层安全组的普通 VPS[cite: 1]。 | **网络控制层完全解耦**，面向由云控制台外部安全组（Security Group）统一接管的网络实例[cite: 2]。 |
+| **版本标识符** | `v3.0-Industrial-Firewall`[cite: 1] | `v3.1-Industrial-Pure`[cite: 2] |
+| **上下文状态追踪** | 包含 `[old_port]`（旧端口）与 `[fw_backend]`（防火墙后端）[cite: 1]。 | 移除所有防火墙相关状态，上下文变量精简至纯业务层[cite: 2]。 |
+| **防火墙自动探测** | 自动感知 `ufw`、`firewalld`、`nftables` 与 `iptables/ip6tables` 四大后端[cite: 1]。 | ❌ 完全不执行任何防火墙环境感知与判断[cite: 2]。 |
+| **端口规则精准注入** | • 依据部署模式动态放行业务 TCP 端口[cite: 1]；<br>• 模式 3 自动放行 UDP，模式 1/2 封堵对应 UDP[cite: 1]；<br>• 模式 1/3 放行 80 TCP，模式 2 自动回收 80 TCP[cite: 1]。 | ❌ 宿主机完全不注入任何网络规则，交由系统原生策略或上层安全组放行[cite: 2]。 |
+| **端口迁移差量回收** | 记录历史端口，更换端口时精准从防火墙中注销旧端口，杜绝遗留无用暴露面[cite: 1]。 | ❌ 无旧端口状态追踪逻辑[cite: 2]。 |
+| **Nftables 高级隔离** | 建立专属 `inet xray_gateway` 表，不污染系统原有过滤链，卸载时整表销毁[cite: 1]。 | ❌ 不调用 `nft` 工具，不写入任何持久化规则[cite: 2]。 |
+| **Iptables 双栈安全** | 同时注入 `iptables` 与 `ip6tables`，卸载时使用 `while -D` 循环彻底清退规则[cite: 1]。 | ❌ 不触碰系统的 IPv4/IPv6 过滤链[cite: 2]。 |
+| **推荐适用场景** | 搬瓦工、RackNerd、Vultr、OVH 等无网页安全组防护的传统 VPS 宿主机[cite: 1]。 | AWS EC2、Google Cloud (GCP)、阿里云、腾讯云、Oracle Cloud 等具备外部安全组的公有云平台[cite: 2]。 |
 
 ---
 
-## 8. 常见故障排查手册 (FAQ)
+## 六、 源码架构与核心模块逐层详解
 
-### Q1: 部署流程在 Nginx 启动时报错中断？
-* **诊断方法**：在终端执行 `nginx -t` 查看语法错误详细定位。
-* **原因分析**：
-  1. 系统中已有 Apache、Caddy 或宝塔面板占用了 `80` 端口。使用命令 `ss -tulpn | grep :80` 查找占用进程并关闭；
-  2. 域名证书申请失败，导致配置中引用的证书文件路径不存在。检查申请环节的域名解析是否完全生效。
+### 1. LAYER 1: 运行时基座与进程互斥安全体系
+* **Root 权限与执行上下文判定**：检测 `$EUID -ne 0` 时拦截[cite: 1, 2]。利用 `[[ "${BASH_SOURCE[0]}" != "${0}" ]]` 严谨识别当前是直接执行还是 `source` 加载：若是 `source` 加载则使用 `return 1` 安全退出，防止使用 `exit` 误杀用户的 SSH 父会话终端[cite: 1, 2]。
+* **追加模式排他锁 (`exec 9>>"$LOCK_FILE"`)**：舍弃易发生竞态穿透的覆写截断模式（`>`），使用追加模式（`>>`）挂载 `flock -n 9`[cite: 1, 2]。并发启动时未抢到锁的进程不会截断清空已有锁文件，保障先导进程 PID 绝不丢失[cite: 1, 2]。
+* **POSIX 信号级联安全与反递归 Trap**：绑定 `EXIT`、`INT (130)`、`TERM (143)` 信号[cite: 1, 2]。在 `safe_terminate` 清理资源时，首选解绑所有 Trap（`trap - EXIT SIGHUP SIGINT SIGTERM`），彻底阻断反递归调用的死循环[cite: 1, 2]。
+* **全局临时垃圾栈自清理 (`CLEANUP_LIST`)**：所有运行时生成的临时文件与解压路径全部压入栈数组，脚本无论是正常退出还是异常中断，均能保证 100% 自动清空临时垃圾[cite: 1, 2]。
+* **双向域名拓扑智能探测 (`get_domain_info`)**：通过统计点号数量（`tr -cd '.' | wc -c`）识别主域或二级子域，结合 `getent ahostsv4/ahostsv6` 智能探测 `www` 记录解析情况，自适应合流申请双域名证书并配置 Nginx 匹配链[cite: 1, 2]。
 
-### Q2: 模式 3 下 Hysteria 2 无法连接，报错 "Handshake Failed"？
-* **诊断方法**：执行 `journalctl -u hysteria-server -e` 调取服务端握手日志。
-* **排查步骤**：
-  1. 确认云厂商安全组（AWS、Oracle、腾讯云等）控制台是否**已显式放行对应端口的 UDP 协议**；
-  2. 确认客户端系统时间与服务器系统时间误差在 60 秒以内；
-  3. 部分地区运营商存在恶劣的 UDP QoS 封锁或丢包，可在客户端尝试降低发包速率或开启端口跳跃特性。
+### 2. LAYER 2: 基础设施策略与防火墙自适应引擎
+* **Debian 13+ 内核路径模块化自适应 (`sys_setup_bbr`)**：
+  * 读取 `/etc/os-release` 获取主版本号[cite: 1, 2]；
+  * 若为 **Debian 13 (Trixie)** 及以上，清理旧残留并转入 `/etc/sysctl.d/99-custom.conf` 模块化路径，调用 `sysctl --system` 实现全量原子生效[cite: 1, 2]；
+  * 低版本系统保持对 `/etc/sysctl.conf` 与 `sysctl -p` 的平滑兼容，配置 `fq` 队列与 `bbr` 控制算法[cite: 1, 2]。
+* **Systemd 日志配额熔断 (`sys_setup_journald`)**：
+  强制在 `/etc/systemd/journald.conf.d/99-prophet.conf` 注入 `SystemMaxUse=100M`、`MaxRetentionSec=7day` 并关闭向 `/var/log/syslog` 的冗余转发，杜绝日志膨胀耗尽磁盘空间[cite: 1, 2]。
+* **多后端自适应防火墙引擎 (`v3.0.sh` 独占)**：
+  * **UFW**：自动识别并调用 `ufw allow/delete`[cite: 1]。
+  * **Firewalld**：调用 `firewall-cmd --permanent` 并在操作后自动执行 `--reload`[cite: 1]。
+  * **Nftables**：建立独立的 `inet xray_gateway` 专属表和规则链，规则单独持久化保存至 `/etc/nftables.d/xray.nft`，并在 `/etc/nftables.conf` 中追加引用包含，不污染主防火墙体系[cite: 1]。
+  * **Iptables**：同时操作 IPv4 与 IPv6 规则链，卸载时使用 `while iptables -D ...` 循环保证脏规则完全排空[cite: 1]。
 
-### Q3: 运行脚本时提示 `检测到已有安装程序正在运行 (PID: xxxx)`？
-* **原因分析**：前次运行被异常强制杀死，未触发脚本清理陷阱，导致 `/var/run/xray_script.lock` 遗留内核排他锁。
-* **解决方案**：
+### 3. LAYER 3: 业务组件生命周期驱动
+* **ACME 证书驱动 (`driver_cert_install`)**：
+  * 优先校验 `/etc/nginx/ssl/${domain}_ecc.cer` 是否存在，存在则跳过申请直接复用，杜绝触发 Let's Encrypt 频次限额[cite: 1, 2]；
+  * 支持 **DNS API**（Cloudflare、Namesilo）与 **HTTP Webroot** 模式[cite: 1, 2]；
+  * 固化 `LE_NO_LOG='1'`、`DEBUG='0'` 至 `account.conf`，阻断调试日志写入[cite: 1, 2]；
+  * 自动注入 `xray-acme.timer`，实现每天 02:00（SGT）静默巡检自动续期[cite: 1, 2]。
+* **Nginx 伪装网关驱动 (`driver_nginx_install`)**：
+  * **动态语法探针**：生成 `/tmp/ngx_probe.conf` 探针检测 `ssl_reject_handshake on;`（开启握手阻断）与 `http2 on;`（现代语法兼容），防止版本过低或过高导致配置解析崩溃[cite: 1, 2]；
+  * **三重虚拟主机划分**：
+    1. 8443 端口：挂载真实证书与 3D 伪装站点，作为 Xray Reality 的合法回落目的地[cite: 1, 2]；未通过合规 SNI 访问时直接断开握手[cite: 1, 2]；
+    2. 80 端口：保留 `^~ /.well-known/acme-challenge/` 供证书自动续签，其他请求强制 301 重定向至 HTTPS[cite: 1, 2]；
+    3. 8444 端口（模式 3）：提供明文 HTTP 站点，作为 Hysteria 2 的伪装代理回落目标[cite: 1, 2]。
+  * **下载部署 3D 伪装模板**：拉取真实 3D 网页模板覆盖 `/var/www/html`，若下载失败则自动生成规范的 403 Forbidden 兜底网页[cite: 1, 2]。
+* **Xray 代理引擎驱动 (`driver_xray_install` / `driver_xray_configure`)**：
+  * **凭据持久化防丢算法**：优先调用 `jq` 读取旧配置的 UUID、Private Key 与 Short ID；若存在私钥则通过 `x25519 -i` 反推公钥，重装完全不破坏客户端已有配置[cite: 1, 2]；
+  * **X25519 数学推演闭环校验**：初次生成密钥时，在候选密钥池中通过反向推导严格校验公私钥匹配性，彻底杜绝正则提取错位隐患[cite: 1, 2]；
+  * **DNS 引导自解析防死锁 (Bootstrap Hosts)**：显式静态绑定 `dns.cloudflare.com` 与 `dns.google` 的真实 IP 地址，彻底消除 DoH 启动时的递归依赖解析死锁[cite: 1, 2]；
+  * **安全分流规则集成**：预设内网私有地址、BT 种子协议、常见广告域名以及中国大陆 IP/域名的拦截黑洞规则[cite: 1, 2]。
+* **Hysteria 2 双栈协议驱动 (`driver_hysteria_install`)**：
+  * 本地生成 16 字节高强度随机认证密码，监听与 Xray 相同的业务端口（UDP 协议）[cite: 1, 2]；
+  * 伪装回落直连本地 Nginx 8444 端口，实现与常见 Web 服务的拟真度协同[cite: 1, 2]；
+  * 注册 `hysteria-cert-watcher.path`，证书落盘时自动轮询校验完整性并完成热重启[cite: 1, 2]。
+
+### 4. LAYER 4: 业务交互编排与状态机对齐
+* **双栈 IP 与域名解析智能校验**：结合 Cloudflare DoH API 与系统底层的 `getent`，智能检测域名的 A/AAAA 记录是否已成功解析至本机公网 IP[cite: 1, 2]。
+* **端口占用主动防御扫描**：利用 `ss` 工具深度扫描 TCP 与 UDP，禁止用户选择 80、8443、8444 等内部保留回落端口，规避冲突隐患[cite: 1, 2]。
+* **状态机对齐与异构资产物理擦除 (`workflow_align_modes`)**：
+  * 退出模式 3：物理删除 Hysteria 2 二进制、配置及证书监听服务，释放 UDP 端口[cite: 1, 2]；
+  * 切换到模式 2：物理注销证书定时器，彻底 `purge` 卸载 Nginx 与 Socat 软件包，删除 Web 网站与证书资产，使系统回退至极简状态[cite: 1, 2]。
+* **RFC 3986 标准 URI 规范化输出**：自动识别 IPv4 与 IPv6，对 IPv6 格式自适应包装 `[...]` 定界符并生成分享链接与终端控制台二维码[cite: 1, 2]。
+
+### 5. LAYER 5: CLI 调度入口与菜单驱动
+* 提供模块化的控制台文本交互菜单，清晰支持 **部署脚本**、**卸载服务**、**查看定时任务及证书状态** 与 **安全退出**[cite: 1, 2]。
+* **焦土式与温和式卸载双选**：卸载时提供确认选项，既可仅回收代理业务服务，也可彻底 `purge` 底层安装的依赖包（Nginx、Socat、JQ 等），还原系统的纯净底座[cite: 1, 2]。
+
+---
+
+## 七、 常见故障排查手册 (Troubleshooting)
+
+### 1. 域名解析校验提示 `[WARN] 解析 IP 与本机 IP 不匹配`
+* **故障诱因**：域名在 Cloudflare 等解析商处开启了 CDN 代理加速（即“橙色小云朵”处于开启状态），对外暴露的均为 Cloudflare Anycast IP，而非 VPS 的真实公网源站 IP[cite: 1, 2]。
+* **处置方案**：登录 DNS 控制台，将对应解析记录调整为 **仅限 DNS (DNS only / 灰色小云朵)**，等待 1-2 分钟缓存刷新后重新执行脚本。
+
+### 2. Nginx 启动报错 `bind() to 0.0.0.0:80 failed (Address already in use)`
+* **故障诱因**：宿主机原有的 Apache2、Caddy 或旧证书申请程序霸占了 80 端口。
+* **处置方案**：
   ```bash
-  # 确认该进程已退出后，手动删除锁文件重新执行
-  rm -f /var/run/xray_script.lock
+  ss -tulpn | grep :80                # 定位占用 80 端口的进程与 PID
+  systemctl stop apache2 2>/dev/null  # 若为 Apache2，执行停止并禁用
+  systemctl disable apache2 2>/dev/null
+  systemctl restart nginx             # 重新启动 Nginx
   ```
 
-### Q4: 重新部署或更换端口后，需要重新配置客户端吗？
-* **答案**：
-  * **Xray Reality (模式 1/2/3)**：**完全不需要**。脚本内置持久化保护，UUID、私钥、公钥与 Short ID 保持绝对一致。若仅修改了监听端口，只需在客户端修改端口数值即可立即恢复连接。
-  * **Hysteria 2 (模式 3)**：需要更新密码。Hysteria 2 每次重新部署均会生成全新的 32 位高强度密码以保证安全性。
+### 3. Hysteria 2 (模式 3) 客户端无法建立握手连接
+* **故障诱因**：云厂商控制台的安全组未放行对应端口的 **UDP** 协议；或本地防火墙拦截。
+* **处置方案**：
+  1. 登录公有云控制台（如 AWS、阿里云、腾讯云、甲骨文），检查安全组入站规则，显式添加入站协议为 `UDP` 的业务端口；
+  2. 若运行 `v3.0.sh`，在终端执行 `nft list chain inet xray_gateway input` 或 `iptables -vnL INPUT` 确认对应端口的 UDP 规则已放行且有数据包通过计数[cite: 1]；
+  3. 执行 `journalctl -u hysteria-server -e` 查阅服务端最新日志，确认是否已收到客户端的 QUIC 握手请求。
 
----
-
-> *Architected for High-Performance Production Environments.*
+### 4. 客户端连接报告 `certificate verify failed / TLS handshake error`
+* **故障诱因**：
+  * **模式 1/3**：证书未签发成功或初次申请时错误选用了测试环境（Staging）[cite: 1, 2]。执行 `/root/.acme.sh/acme.sh --list` 确认证书颁发 CA 是否为生产权威 CA[cite: 1, 2]；
+  * **模式 2**：伪装域名（SNI）在国内被运营商路由丢包阻断，或该伪装站点不支持 TLS 1.3 / HTTP/2 握手协商。可在服务器端执行 `curl -Iv https://<伪装SNI>` 检验目标站点的连通性与协议参数。
