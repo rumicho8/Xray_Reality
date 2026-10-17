@@ -51,6 +51,7 @@ declare -gA CTX=(
     [namesilo_key]=""
     [cert_mode]="--server letsencrypt"
     [port]="443"
+    [reuse_config]="1"
     [hy2_pass]=""
     [ipv4]=""
     [ipv6]=""
@@ -246,13 +247,57 @@ driver_cert_install() {
         acme_args="$acme_args -d $d"
     done
 
+    # 检测并清理与当前输入域名不一致的历史域名证书资产与续签配置
+    if [[ -d /etc/nginx/ssl ]]; then
+        local f old_d
+        for f in /etc/nginx/ssl/*_ecc.cer /etc/nginx/ssl/*_ecc.key; do
+            [[ -e "$f" ]] || continue
+            old_d=$(basename "$f")
+            old_d="${old_d%_ecc.cer}"
+            old_d="${old_d%_ecc.key}"
+            if [[ "$old_d" != "$domain" ]]; then
+                log_info "检测到域名变更，正在清理旧域名证书资产 ($old_d)..."
+                [[ -x "$ACME_BIN" ]] && "$ACME_BIN" --remove -d "$old_d" --ecc >/dev/null 2>&1 || true
+                rm -rf "/root/.acme.sh/${old_d}_ecc" 2>/dev/null || true
+                rm -f "/etc/nginx/ssl/${old_d}_ecc.cer" "/etc/nginx/ssl/${old_d}_ecc.key" 2>/dev/null || true
+            fi
+        done
+    fi
+    if [[ -d /root/.acme.sh ]]; then
+        local ecc_dir old_main_domain
+        for ecc_dir in /root/.acme.sh/*_ecc; do
+            [[ -d "$ecc_dir" ]] || continue
+            old_main_domain=$(basename "$ecc_dir")
+            old_main_domain="${old_main_domain%_ecc}"
+            if [[ "$old_main_domain" != "$primary_domain" ]]; then
+                log_info "检测到域名变更，正在清理旧域名 ACME 续签目录 ($old_main_domain)..."
+                [[ -x "$ACME_BIN" ]] && "$ACME_BIN" --remove -d "$old_main_domain" --ecc >/dev/null 2>&1 || true
+                rm -rf "$ecc_dir" 2>/dev/null || true
+            fi
+        done
+    fi
+
     local force_issue=""
     if [[ -s "$cert_file" && -s "$key_file" ]]; then
-        local cert_issuer
+        local cert_issuer san_text san_missing=0
         cert_issuer=$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null || true)
+        san_text=$(openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null || true)
+        for d in $domains; do
+            if ! echo "$san_text" | grep -Eiq "DNS:[[:space:]]*${d}(,|$|[[:space:]])"; then
+                san_missing=1
+                break
+            fi
+        done
+
         if [[ "${CTX[cert_mode]}" != "--staging" ]] && echo "$cert_issuer" | grep -qiE "staging|fake"; then
             log_warn "检测到现有证书为 Staging 测试证书，即将清除并重新申请 Production 正式证书..."
             rm -f "$cert_file" "$key_file"
+            rm -rf "/root/.acme.sh/${primary_domain}_ecc" 2>/dev/null || true
+            force_issue="--force"
+        elif [[ $san_missing -eq 1 ]]; then
+            log_warn "检测到域名列表变更 ($domains)，现有证书 SAN 未完全覆盖，即将重新申请证书..."
+            rm -f "$cert_file" "$key_file"
+            rm -rf "/root/.acme.sh/${primary_domain}_ecc" 2>/dev/null || true
             force_issue="--force"
         else
             log_info "检测到服务器已存在有效证书，跳过申请步骤直接复用。"
@@ -573,7 +618,7 @@ driver_nginx_purge_package() {
     log_info "正在物理清退 Nginx、系统包依赖与历史日志..."
     driver_nginx_clean_site
     if command -v nginx >/dev/null 2>&1 || [[ -f /lib/systemd/system/nginx.service ]]; then
-        apt-get purge -yqq nginx nginx-common socat >/dev/null 2>&1 || true
+        apt-get purge -yqq nginx nginx-common nginx-core nginx-full socat >/dev/null 2>&1 || true
         apt-get autoremove -yqq >/dev/null 2>&1
     fi
     rm -rf /etc/nginx /var/www /var/log/nginx 2>/dev/null || true
@@ -713,11 +758,13 @@ driver_xray_configure() {
             echo -e "${C_YELLOW}检测到服务器已存在历史 Xray 节点配置 (UUID: $old_uuid)。${C_RESET}"
             read -rp "是否保留复用历史密钥与 UUID？[Y/n, 默认 Y]: " REUSE_XRAY_KEY
             if [[ ! "$REUSE_XRAY_KEY" =~ ^[nN]$ ]]; then
+                CTX[reuse_config]="1"
                 CTX[uuid]="$old_uuid"
                 CTX[priv_key]="$old_priv"
                 CTX[short_id]="$old_sid"
                 log_info "已继承历史 UUID 与 Reality 密钥配置。"
             else
+                CTX[reuse_config]="0"
                 log_info "已选择重置，将生成全新 UUID 与 Reality 密钥对。"
             fi
         fi
@@ -886,13 +933,15 @@ driver_hysteria_install() {
 
     mkdir -p "$HY2_CONF_DIR"
 
-    if [[ -f "$HY2_CONFIG" ]]; then
+    if [[ "${CTX[reuse_config]}" == "1" && -f "$HY2_CONFIG" ]]; then
         local old_pass
         old_pass=$(grep -E '^[[:space:]]*password:' "$HY2_CONFIG" 2>/dev/null | head -n1 | awk '{print $2}' | tr -d '"'\''')
         if [[ -n "$old_pass" ]]; then
             CTX[hy2_pass]="$old_pass"
             log_info "已继承历史 Hysteria2 认证密码。"
         fi
+    elif [[ "${CTX[reuse_config]}" == "0" && -f "$HY2_CONFIG" ]]; then
+        log_info "已跟随重置策略，将生成全新 Hysteria2 认证密码。"
     fi
     [[ -z "${CTX[hy2_pass]}" ]] && CTX[hy2_pass]=$(openssl rand -hex 16)
 
@@ -990,6 +1039,7 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now hysteria-cert-watcher.path >/dev/null 2>&1
+    systemctl enable hysteria-server >/dev/null 2>&1
     # 强制执行 restart，确保载入内存的是新配置密码
     systemctl restart hysteria-server || log_err "Hysteria2 启动失败，请检查端口占用。"
     log_ok "Hysteria2 服务部署成功。"
