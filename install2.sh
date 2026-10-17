@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Xray Reality Automation Engine (Industrial Architecture Edition - V3.2 Pro)
+# Xray Reality Automation Engine (Industrial Architecture Edition - V3.2 Fixed)
 # Architecture: VLESS + XTLS-Vision + Reality + Nginx Reverse Proxy + Hysteria2
 # ==============================================================================
 
@@ -13,7 +13,7 @@ if [[ $EUID -ne 0 ]]; then
     [[ "${BASH_SOURCE[0]}" != "${0}" ]] && return 1 2>/dev/null || exit 1
 fi
 
-readonly SCRIPT_VERSION="v3.2-Industrial-Pro"
+readonly SCRIPT_VERSION="v3.2-Industrial-Fixed"
 readonly LOG_FILE="/var/log/xray_install.log"
 readonly LOCK_FILE="/var/run/xray_script.lock"
 readonly SCRIPT_DIR="/usr/local/etc/xray-script"
@@ -86,7 +86,7 @@ safe_terminate() {
     [[ "${BASH_SOURCE[0]}" != "${0}" ]] && return "$code" 2>/dev/null || exit "$code"
 }
 
-# 进程并发互斥锁（采用追加模式与绝对互斥判定，杜绝截断穿透与误删锁）
+# 进程并发互斥锁（严密互斥，非持有锁进程退出时禁止误删锁）
 exec 9>>"$LOCK_FILE"
 if ! flock -n 9; then
     ACTIVE_PID=$(cat "$LOCK_FILE" 2>/dev/null)
@@ -130,7 +130,7 @@ get_domain_info() {
         [[ -z "$ext_v4" ]] && ext_v4=$(getent ahostsv4 "$extra_d" 2>/dev/null | awk '{print $1}' | head -n1)
         [[ -z "$ext_v6" ]] && ext_v6=$(getent ahostsv6 "$extra_d" 2>/dev/null | awk '{print $1}' | grep -v '^::ffff:' | head -n1)
 
-        # 方案 4A：仅当关联域名解析出的 IP 与本机 IP 一致时才自动合并
+        # 方案 4A：仅当额外域名的解析 IP 严格命中本机公网 IP 时才允许合并
         if [[ (-n "${CTX[ipv4]}" && "${CTX[ipv4]}" == "$ext_v4") || (-n "${CTX[ipv6]}" && "${CTX[ipv6]}" == "$ext_v6") ]]; then
             if [[ "$domain" == www.* ]]; then
                 echo "$extra_d $domain"
@@ -175,7 +175,6 @@ sys_setup_bbr() {
     local bbr_conf_file="/etc/sysctl.conf"
     local need_migrate=0
 
-    # 1. 确定当前系统规范的目标路径
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
         local major_version="${VERSION_ID%%.*}"
@@ -187,7 +186,6 @@ sys_setup_bbr() {
         log_info "当前系统信息: ${PRETTY_NAME:-Linux} | 目标配置路径: $bbr_conf_file"
     fi
 
-    # 2. 状态判定：目标文件是否已存在配置？内存是否已加载？
     local file_has_bbr=0
     if [[ -s "$bbr_conf_file" ]] && grep -q "tcp_congestion_control=bbr" "$bbr_conf_file"; then
         file_has_bbr=1
@@ -198,24 +196,22 @@ sys_setup_bbr() {
         kernel_has_bbr=1
     fi
 
-    # 3. 只有当目标文件已经写好、且内核正在运行 BBR 时，才允许完全跳过
     if [[ $file_has_bbr -eq 1 && $kernel_has_bbr -eq 1 ]]; then
         log_ok "网络加速 (BBR) 已处于开启状态且配置文件完整，跳过配置。"
         return 0
     fi
 
-    # 4. 执行配置动作
     if [[ $need_migrate -eq 1 ]]; then
         mkdir -p /etc/sysctl.d
         sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null || true
         sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null || true
     fi
 
+    touch "$bbr_conf_file"
     sed -i '/net.core.default_qdisc/d' "$bbr_conf_file" 2>/dev/null || true
     sed -i '/net.ipv4.tcp_congestion_control/d' "$bbr_conf_file" 2>/dev/null || true
     echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" >> "$bbr_conf_file"
 
-    # 5. 生效载入
     if [[ "$bbr_conf_file" == "/etc/sysctl.conf" ]]; then
         sysctl -p >/dev/null 2>&1 || true
     else
@@ -281,7 +277,6 @@ driver_cert_install() {
     if [[ "$api" == "webroot" ]]; then
         local acme_temp_conf="/etc/nginx/sites-enabled/acme_temp"
         CLEANUP_LIST+=("$acme_temp_conf")
-        # 清除可能导致语法错误的旧配置，确保临时 80 端口验证正常启动
         rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/xray
         cat > "$acme_temp_conf" <<EOF
 server {
@@ -401,9 +396,9 @@ EOF
     rm -f /etc/nginx/sites-enabled/default
 
     log_info "正在配置 Nginx 伪装网站和安全策略..."
-    log_info "正在通过语法探针检测 Nginx 核心特性支持..."
     local has_reject=0
     local probe_conf="/tmp/ngx_probe.conf"
+    CLEANUP_LIST+=("$probe_conf")
     cat > "$probe_conf" <<'EOF'
 events {}
 http { server { listen 127.0.0.1:8443 ssl; ssl_reject_handshake on; } }
@@ -422,7 +417,7 @@ http { server { http2 on; } }
 EOF
     if nginx -t -c "$probe_conf" >/dev/null 2>&1; then
         has_http2=1
-        log_ok "HTTP/2 特性模式: 采用现代独立 [http2 on] 语法 (server 作用域校验通过)。"
+        log_ok "HTTP/2 特性模式: 采用现代独立 [http2 on] 语法。"
     else
         log_info "HTTP/2 特性模式: 降级采用兼容模式 [listen ... http2]。"
     fi
@@ -468,7 +463,6 @@ server {
 }
 EOF
 
-    # 动态构建 80 端口跳转地址：非 443 端口自动拼接实际端口
     local redirect_url="https://\$host\$request_uri"
     if [[ "${CTX[port]}" != "443" ]]; then
         redirect_url="https://\$host:${CTX[port]}\$request_uri"
@@ -565,7 +559,7 @@ EOF
     chown -R www-data:www-data "$target_dir" 2>/dev/null || true
 
     systemctl enable nginx >/dev/null 2>&1
-    systemctl restart nginx || log_err "Nginx 服务重载失败。"
+    systemctl restart nginx || log_err "Nginx 服务启动/重载失败。"
     log_ok "Nginx 服务启动成功。"
 }
 
@@ -609,6 +603,7 @@ driver_xray_install() {
 
     mv -f xray "$XRAY_BIN" && chmod +x "$XRAY_BIN"
     mkdir -p "$XRAY_SHARE_DIR" "$XRAY_CONF_DIR"
+    # 放置官方基础规则文件垫底兜底
     mv -f geoip.dat geosite.dat "$XRAY_SHARE_DIR/" 2>/dev/null || true
 
     cat > /etc/systemd/system/xray.service <<EOF
@@ -631,14 +626,87 @@ EOF
     chmod 644 /etc/systemd/system/xray.service
     systemctl daemon-reload
     cd "$HOME" && rm -rf "$tmp_xray"
-    log_ok "Xray 系统服务配置完成。"
+    log_ok "Xray 核心与系统服务单元准备就绪。"
+}
+
+# --- [Driver: 路由分流规则自动化更新] ---
+driver_rules_dat_setup() {
+    log_info "正在配置增强版分流规则库与自动更新任务..."
+    mkdir -p "$SCRIPT_DIR" "$XRAY_SHARE_DIR"
+    cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
+#!/bin/bash
+exec 9> /var/lock/xray-dat.lock
+flock -n 9 || exit 0
+SHARE_DIR="/usr/local/share/xray"
+mkdir -p "$SHARE_DIR"
+changed=0
+
+update_file() {
+    local f=$1; local u=$2
+    local target_tmp="$SHARE_DIR/${f}.new"
+    if curl -fL --max-time 300 --connect-timeout 60 --retry 5 --retry-delay 3 --retry-connrefused -o "$target_tmp" "$u" && [[ -s "$target_tmp" ]]; then
+        local f_size
+        f_size=$(stat -c%s "$target_tmp" 2>/dev/null || wc -c < "$target_tmp" 2>/dev/null | tr -d ' ' || echo 0)
+        if [[ "$f_size" -ge 512000 ]] && ! cmp -s "$target_tmp" "$SHARE_DIR/$f"; then
+            mv -f "$target_tmp" "$SHARE_DIR/$f"
+            changed=1
+            return 0
+        fi
+    fi
+    rm -f "$target_tmp"
+    return 1
+}
+
+update_file "geoip.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+update_file "geosite.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+
+# 仅当 Xray 处于 active 运行状态时才触发热更新重启，初装部署阶段静默跳过
+[[ $changed -eq 1 ]] && systemctl is-active --quiet xray && systemctl restart xray >/dev/null 2>&1 || true
+EOF
+    chmod 755 "$SCRIPT_DIR/update-dat.sh"
+
+    echo -e "${C_BLUE}--- 路由分流资源热同步 ---${C_RESET}"
+    bash "$SCRIPT_DIR/update-dat.sh" || true
+    echo "--------------------------"
+
+    cat > /etc/systemd/system/xray-dat.service <<EOF
+[Unit]
+Description=Xray Dat Database Updater
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=$SCRIPT_DIR/update-dat.sh
+LimitNOFILE=1048576
+EOF
+
+    cat > /etc/systemd/system/xray-dat.timer <<EOF
+[Unit]
+Description=Timer for Xray Dat Update (SGT)
+
+[Timer]
+OnCalendar=Mon *-*-* 03:00:00 Asia/Singapore
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now xray-dat.timer >/dev/null 2>&1
+    log_ok "增强版分流规则库部署与定时更新任务配置完成。"
+}
+
+driver_rules_dat_purge() {
+    unit_purge "xray-dat.timer" "xray-dat.service"
+    rm -f "$SCRIPT_DIR/update-dat.sh" /var/lock/xray-dat.lock
 }
 
 driver_xray_configure() {
     local domain="${CTX[domain]}"
     log_info "正在生成 Xray 配置文件和加密密钥..."
 
-    # 提供历史密钥与 UUID 的复用/重置选择权
     if [[ -f "$XRAY_CONFIG" ]]; then
         local old_uuid old_priv old_sid
         old_uuid=$(jq -r '.inbounds[0].settings.clients[0].id' "$XRAY_CONFIG" 2>/dev/null)
@@ -653,7 +721,7 @@ driver_xray_configure() {
                 CTX[short_id]="$old_sid"
                 log_info "已继承历史 UUID 与 Reality 密钥配置。"
             else
-                log_info "已选择重置，将生成全新的 UUID 与 Reality 密钥对。"
+                log_info "已选择重置，将生成全新 UUID 与 Reality 密钥对。"
             fi
         fi
     fi
@@ -682,7 +750,9 @@ driver_xray_configure() {
             done
         done
     fi
-    log_ok "安全加密密钥生成成功。"
+
+    [[ -z "${CTX[priv_key]}" || -z "${CTX[pub_key]}" ]] && log_err "Xray x25519 密钥对生成失败，请检查 Xray 核心运行环境。"
+    log_ok "安全加密密钥确认成功。"
 
     local dest_addr="127.0.0.1:8443"
     local server_names_json
@@ -795,8 +865,9 @@ EOF
     fi
 
     systemctl enable xray >/dev/null 2>&1
+    # 唯一次冷启动，规避重复重启触发 systemd 保护或端口占用
     systemctl restart xray || log_err "Xray 服务启动失败，请使用 journalctl -u xray -e 查看底层日志。"
-    log_ok "Xray 路由规则配置成功。"
+    log_ok "Xray 路由规则配置与核心引擎启动成功。"
 }
 
 driver_xray_purge() {
@@ -819,7 +890,6 @@ driver_hysteria_install() {
 
     mkdir -p "$HY2_CONF_DIR"
 
-    # 优先复用历史密码，保障客户端无感平滑切换
     if [[ -f "$HY2_CONFIG" ]]; then
         local old_pass
         old_pass=$(grep -E '^[[:space:]]*password:' "$HY2_CONFIG" 2>/dev/null | head -n1 | awk '{print $2}' | tr -d '"'\''')
@@ -830,7 +900,7 @@ driver_hysteria_install() {
     fi
     [[ -z "${CTX[hy2_pass]}" ]] && CTX[hy2_pass]=$(openssl rand -hex 16)
 
-    # 省略 bandwidth 字段，自动启用标准 BBR 拥塞控制
+    # 省略 bandwidth 字段，强制回归标准 BBR 拥塞控制自适应
     cat > "$HY2_CONFIG" <<EOF
 listen: ":${CTX[port]}"
 tls:
@@ -924,7 +994,7 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now hysteria-cert-watcher.path >/dev/null 2>&1
-    # 强制执行 restart，确保全新配置与密码即刻载入内存生效
+    # 强制执行 restart，确保载入内存的是新配置密码
     systemctl restart hysteria-server || log_err "Hysteria2 启动失败，请检查端口占用。"
     log_ok "Hysteria2 服务部署成功。"
 }
@@ -933,78 +1003,6 @@ driver_hysteria_purge() {
     unit_purge "hysteria-server.service" "hysteria-cert-watcher.path" "hysteria-cert-watcher.service"
     rm -f "$HY2_BIN" "$SCRIPT_DIR/hysteria-cert-restart.sh" /run/hysteria-cert.lock
     rm -rf "$HY2_CONF_DIR" /tmp/hy2_* 2>/dev/null || true
-}
-
-# --- [Driver: 路由分流规则自动化更新] ---
-driver_rules_dat_setup() {
-    log_info "正在配置自动更新任务..."
-    mkdir -p "$SCRIPT_DIR"
-    cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
-#!/bin/bash
-exec 9> /var/lock/xray-dat.lock
-flock -n 9 || exit 0
-SHARE_DIR="/usr/local/share/xray"
-changed=0
-
-update_file() {
-    local f=$1; local u=$2
-    local target_tmp="$SHARE_DIR/${f}.new"
-    if curl -fL --max-time 300 --connect-timeout 60 --retry 5 --retry-delay 3 --retry-connrefused -o "$target_tmp" "$u" && [[ -s "$target_tmp" ]]; then
-        local f_size
-        f_size=$(stat -c%s "$target_tmp" 2>/dev/null || wc -c < "$target_tmp" 2>/dev/null | tr -d ' ' || echo 0)
-        if [[ "$f_size" -ge 512000 ]] && ! cmp -s "$target_tmp" "$SHARE_DIR/$f"; then
-            mv -f "$target_tmp" "$SHARE_DIR/$f"
-            changed=1
-            return 0
-        fi
-    fi
-    rm -f "$target_tmp"
-    return 1
-}
-
-update_file "geoip.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-update_file "geosite.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
-
-[[ $changed -eq 1 ]] && systemctl is-active --quiet xray && systemctl restart xray >/dev/null 2>&1 || true
-EOF
-    chmod 755 "$SCRIPT_DIR/update-dat.sh"
-
-    echo -e "${C_BLUE}--- 路由分流资源热同步 ---${C_RESET}"
-    bash "$SCRIPT_DIR/update-dat.sh" || true
-    echo "--------------------------"
-
-    cat > /etc/systemd/system/xray-dat.service <<EOF
-[Unit]
-Description=Xray Dat Database Updater
-
-[Service]
-Type=oneshot
-User=root
-ExecStart=$SCRIPT_DIR/update-dat.sh
-LimitNOFILE=1048576
-EOF
-
-    cat > /etc/systemd/system/xray-dat.timer <<EOF
-[Unit]
-Description=Timer for Xray Dat Update (SGT)
-
-[Timer]
-OnCalendar=Mon *-*-* 03:00:00 Asia/Singapore
-Persistent=true
-RandomizedDelaySec=10m
-
-[Install]
-WantedBy=timers.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable --now xray-dat.timer >/dev/null 2>&1
-    log_ok "自动更新任务配置完成。"
-}
-
-driver_rules_dat_purge() {
-    unit_purge "xray-dat.timer" "xray-dat.service"
-    rm -f "$SCRIPT_DIR/update-dat.sh" /var/lock/xray-dat.lock
 }
 
 # ------------------------------------------------------------------------------
@@ -1016,7 +1014,7 @@ workflow_fetch_host_ips() {
 }
 
 workflow_select_port() {
-    echo -e "${C_BLUE}[TIP] 建议使用默认 443 端口以获得最佳伪装效果与网络穿透率。${C_RESET}"
+    echo -e "${C_BLUE}[TIP] 强烈建议使用默认 443 端口以获得最佳伪装深度与网络穿透率。${C_RESET}"
     while true; do
         read -rp "请设置 Xray 监听端口 (范围 1-65535) [默认 443]: " PORT_INPUT
         CTX[port]=${PORT_INPUT:-443}
@@ -1060,6 +1058,11 @@ workflow_get_inputs() {
     workflow_fetch_host_ips
 
     if [[ "${CTX[mode]}" =~ ^[13]$ ]]; then
+        # 外部 80 端口占用排查（防止第三方 Apache/Caddy 抢占）
+        if ss -tln | grep -qE ":80\b"; then
+            log_warn "检测到当前服务器 80 端口已被外部进程占用！若非本脚本旧服务，Web 回落与证书签发可能会失败。"
+        fi
+
         read -rp "请输入已解析到本服务器的域名 (例如 my.domain.com): " DOMAIN_INPUT
         CTX[domain]=$(echo "$DOMAIN_INPUT" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
         [[ -z "${CTX[domain]}" ]] && log_err "域名不能为空或格式错误。"
@@ -1162,7 +1165,7 @@ workflow_deploy() {
     rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
     dpkg --configure -a >/dev/null 2>&1 || true
 
-    # 停止包括 watcher 在内的所有服务，避免部署过程中产生竞态干扰
+    # 停止包括 watcher 在内的全部服务，消除证书覆盖期间的重启竞态
     systemctl stop xray hysteria-server hysteria-cert-watcher.path >/dev/null 2>&1 || true
     command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1 || true
 
@@ -1226,9 +1229,11 @@ workflow_deploy() {
         driver_cert_setup_timer
     fi
 
-    # 规则更新前置，避免 Xray 刚启动就被立即打断冷重启
-    driver_rules_dat_setup
+    # [严格时序修复] 1. 先准备 Xray 二进制、基础目录与原厂 DAT 兜底
     driver_xray_install
+    # [严格时序修复] 2. 拉取 Loyalsoldier 增强分流规则覆盖原厂 DAT（此时 Xray 未启动，不触发重启）
+    driver_rules_dat_setup
+    # [严格时序修复] 3. 生成完整配置文件、校验语法，并执行全流程中唯一次 cold start
     driver_xray_configure
 
     [[ "${CTX[mode]}" == "3" ]] && driver_hysteria_install
