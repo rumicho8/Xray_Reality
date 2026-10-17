@@ -14,7 +14,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 readonly SCRIPT_VERSION="v3.2-Industrial-Fixed"
-readonly LOG_FILE="/var/log/xray_install.log"
+readonly LOG_FILE="/dev/null"
 readonly LOCK_FILE="/var/run/xray_script.lock"
 readonly SCRIPT_DIR="/usr/local/etc/xray-script"
 readonly XRAY_CONF_DIR="/usr/local/etc/xray"
@@ -63,8 +63,6 @@ declare -gA CTX=(
 
 CLEANUP_LIST=()
 LOCK_ACQUIRED=0
-
-touch "$LOG_FILE" 2>/dev/null || true
 
 log_info() { echo -e "${C_BLUE}[INFO]${C_RESET} $1" | tee -a "$LOG_FILE"; }
 log_ok()   { echo -e "${C_GREEN}[OK]${C_RESET} $1" | tee -a "$LOG_FILE"; }
