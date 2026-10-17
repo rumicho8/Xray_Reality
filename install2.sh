@@ -43,6 +43,7 @@ export APT_LISTCHANGES_FRONTEND="none"
 declare -gA CTX=(
     [mode]="1"
     [domain]=""
+    [domains]=""
     [public_sni]="www.apple.com"
     [dns_api]=""
     [cf_token]=""
@@ -239,8 +240,7 @@ driver_cert_install() {
     local api="${CTX[dns_api]}"
     local cert_file="/etc/nginx/ssl/${domain}_ecc.cer"
     local key_file="/etc/nginx/ssl/${domain}_ecc.key"
-    local domains
-    domains=$(get_domain_info "$domain")
+    local domains="${CTX[domains]}"
     local primary_domain
     primary_domain=$(echo "$domains" | awk '{print $1}')
     local acme_args=""
@@ -355,8 +355,7 @@ driver_cert_purge() {
 # --- [Driver: Nginx 伪装网关] ---
 driver_nginx_install() {
     local domain="${CTX[domain]}"
-    local domains
-    domains=$(get_domain_info "$domain")
+    local domains="${CTX[domains]}"
 
     if [[ ! -s "/etc/nginx/ssl/${domain}_ecc.cer" || ! -s "/etc/nginx/ssl/${domain}_ecc.key" ]]; then
         log_err "Nginx 关联的证书文件不存在 (/etc/nginx/ssl/${domain}_ecc.cer)，请检查证书申请步骤。"
@@ -760,8 +759,7 @@ driver_xray_configure() {
         dest_addr="${CTX[public_sni]}:443"
         server_names_json="[\"${CTX[public_sni]}\"]"
     else
-        local domains
-        domains=$(get_domain_info "$domain")
+        local domains="${CTX[domains]}"
         server_names_json=$(echo "$domains" | sed 's/ /", "/g; s/^/["/; s/$/"]/')
     fi
 
@@ -1067,6 +1065,9 @@ workflow_get_inputs() {
         CTX[domain]=$(echo "$DOMAIN_INPUT" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
         [[ -z "${CTX[domain]}" ]] && log_err "域名不能为空或格式错误。"
 
+        # 全局唯一一次解析并缓存结果，消除后续模块重复调用的网络抖动隐患
+        CTX[domains]=$(get_domain_info "${CTX[domain]}")
+
         echo -e "\n${C_BLUE}正在测试域名解析状态 (双栈智能检测)...${C_RESET}"
         local domain_ipv4="" domain_ipv6=""
         if command -v jq >/dev/null 2>&1; then
@@ -1229,11 +1230,11 @@ workflow_deploy() {
         driver_cert_setup_timer
     fi
 
-    # [严格时序修复] 1. 先准备 Xray 二进制、基础目录与原厂 DAT 兜底
+    # 1. 先准备 Xray 二进制、基础目录与原厂 DAT 兜底
     driver_xray_install
-    # [严格时序修复] 2. 拉取 Loyalsoldier 增强分流规则覆盖原厂 DAT（此时 Xray 未启动，不触发重启）
+    # 2. 拉取 Loyalsoldier 增强分流规则覆盖原厂 DAT（此时 Xray 未启动，不触发重启）
     driver_rules_dat_setup
-    # [严格时序修复] 3. 生成完整配置文件、校验语法，并执行全流程中唯一次 cold start
+    # 3. 生成完整配置文件、校验语法，并执行全流程中唯一次 cold start
     driver_xray_configure
 
     [[ "${CTX[mode]}" == "3" ]] && driver_hysteria_install
