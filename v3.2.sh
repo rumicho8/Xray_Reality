@@ -130,7 +130,7 @@ get_domain_info() {
         [[ -z "$ext_v4" ]] && ext_v4=$(getent ahostsv4 "$extra_d" 2>/dev/null | awk '{print $1}' | head -n1)
         [[ -z "$ext_v6" ]] && ext_v6=$(getent ahostsv6 "$extra_d" 2>/dev/null | awk '{print $1}' | grep -v '^::ffff:' | head -n1)
 
-        # 方案 4A：仅当额外域名的解析 IP 严格命中本机公网 IP 时才允许合并
+        # 仅当额外域名的解析 IP 严格命中本机公网 IP 时才允许合并
         if [[ (-n "${CTX[ipv4]}" && "${CTX[ipv4]}" == "$ext_v4") || (-n "${CTX[ipv6]}" && "${CTX[ipv6]}" == "$ext_v6") ]]; then
             if [[ "$domain" == www.* ]]; then
                 echo "$extra_d $domain"
@@ -223,15 +223,51 @@ sys_setup_bbr() {
 
 sys_clean_apt_cache() {
     log_info "正在清理安装过程中产生的系统垃圾..."
-    apt-get autoremove -yqq >/dev/null 2>&1
-    apt-get clean -yqq >/dev/null 2>&1
-    rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+    apt-get autoremove -yqq >/dev/null 2>&1 || true
+    apt-get clean -yqq >/dev/null 2>&1 || true
     log_ok "系统垃圾清理完毕。"
 }
 
 # ------------------------------------------------------------------------------
 # LAYER 3: 业务组件驱动 (Component Lifecycle Drivers)
 # ------------------------------------------------------------------------------
+
+# --- [Driver: Nginx 基础配置初始化，供证书验证与正式部署共用] ---
+driver_nginx_write_main_conf() {
+    mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled /var/log/nginx /var/www/html
+    chmod 755 /var/www/html
+    cat > /etc/nginx/nginx.conf <<'EOF'
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+error_log /var/log/nginx/error.log notice;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    sendfile on;
+    tcp_nopush on;
+    types_hash_max_size 2048;
+    server_tokens off;
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    ssl_session_tickets off;
+    access_log off;
+    gzip on;
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
+}
+EOF
+    rm -f /etc/nginx/sites-enabled/default
+}
 
 # --- [Driver: ACME 证书管理] ---
 driver_cert_install() {
@@ -303,6 +339,9 @@ driver_cert_install() {
             log_info "检测到服务器已存在有效证书，跳过申请步骤直接复用。"
             return 0
         fi
+    else
+        # 若本地无有效证书但残留了半成品的 acme 域名目录，予以清理保证幂等性
+        rm -rf "/root/.acme.sh/${primary_domain}_ecc" 2>/dev/null || true
     fi
 
     log_info "正在向 Let's Encrypt 申请 TLS 证书 ($domain)..."
@@ -318,6 +357,7 @@ driver_cert_install() {
     fi
 
     if [[ "$api" == "webroot" ]]; then
+        driver_nginx_write_main_conf
         local acme_temp_conf="/etc/nginx/sites-enabled/acme_temp"
         CLEANUP_LIST+=("$acme_temp_conf")
         rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/xray
@@ -329,11 +369,21 @@ server {
     location / { root /var/www/html; }
 }
 EOF
-        systemctl restart nginx >/dev/null 2>&1 || systemctl start nginx >/dev/null 2>&1
-        "$ACME_BIN" --issue $acme_args --webroot /var/www/html --keylength ec-256 ${CTX[cert_mode]} $force_issue
+        if ! systemctl restart nginx >/dev/null 2>&1; then
+            nginx -t 2>&1 || true
+            log_err "Nginx 临时验证服务启动失败，请检查 80 端口占用或 Nginx 环境。"
+        fi
+        "$ACME_BIN" --issue $acme_args --webroot /var/www/html --keylength ec-256 ${CTX[cert_mode]} $force_issue || true
         rm -f "$acme_temp_conf"
     else
-        "$ACME_BIN" --issue --dns "$api" $acme_args --keylength ec-256 ${CTX[cert_mode]} $force_issue
+        "$ACME_BIN" --issue --dns "$api" $acme_args --keylength ec-256 ${CTX[cert_mode]} $force_issue || true
+    fi
+
+    cd "$HOME" || true
+    rm -rf "$tmp_acme" 2>/dev/null || true
+
+    if [[ ! -s "/root/.acme.sh/${primary_domain}_ecc/fullchain.cer" ]]; then
+        log_err "证书签发失败，请检查域名解析、80 端口防火墙或服务商 API 密钥。"
     fi
 
     mkdir -p /etc/nginx/ssl
@@ -342,9 +392,7 @@ EOF
         --fullchain-file "$cert_file" \
         --reloadcmd "systemctl reload nginx || true"
 
-    cd "$HOME" || true
-
-    if [[ -s "$cert_file" ]]; then
+    if [[ -s "$cert_file" && -s "$key_file" ]]; then
         log_ok "TLS 证书申请成功并部署到 Nginx。"
         local acme_conf="/root/.acme.sh/account.conf"
         if [[ -f "$acme_conf" ]]; then
@@ -353,7 +401,7 @@ EOF
             grep -q "DEBUG" "$acme_conf" || echo "DEBUG='0'" >> "$acme_conf"
         fi
     else
-        log_err "证书申请失败，请检查域名解析与服务商密钥。"
+        log_err "证书安装失败，未检测到有效证书文件。"
     fi
 }
 
@@ -405,37 +453,7 @@ driver_nginx_install() {
     fi
 
     log_info "正在配置 Nginx 主程序..."
-    cat > /etc/nginx/nginx.conf <<'EOF'
-user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-error_log /var/log/nginx/error.log notice;
-include /etc/nginx/modules-enabled/*.conf;
-
-events {
-    worker_connections 1024;
-}
-
-http {
-    sendfile on;
-    tcp_nopush on;
-    types_hash_max_size 2048;
-    server_tokens off;
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-    ssl_session_tickets off;
-    access_log off;
-    gzip on;
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
-}
-EOF
-    rm -f /etc/nginx/sites-enabled/default
+    driver_nginx_write_main_conf
 
     log_info "正在配置 Nginx 伪装网站和安全策略..."
     local has_reject=0
@@ -466,6 +484,7 @@ EOF
     rm -f "$probe_conf"
 
     local tmp_conf="/tmp/xray_nginx.conf"
+    CLEANUP_LIST+=("$tmp_conf")
     rm -f "$tmp_conf"
 
     if [[ $has_reject -eq 1 ]]; then
@@ -575,7 +594,7 @@ EOF
     local zip_file="/tmp/web_template.zip"
     CLEANUP_LIST+=("$temp_extract" "$zip_file")
     mkdir -p "$target_dir"
-    rm -rf "${target_dir:?}/"* "${target_dir:?}/".[!.]* 2>/dev/null
+    find "$target_dir" -mindepth 1 -delete 2>/dev/null || true
 
     log_info "正在下载伪装网页文件..."
     echo -e "${C_BLUE}--- 解压伪装网页 ---${C_RESET}"
@@ -610,16 +629,18 @@ driver_nginx_clean_site() {
     systemctl stop nginx >/dev/null 2>&1 || true
     systemctl disable nginx >/dev/null 2>&1 || true
     rm -f /etc/nginx/sites-available/xray /etc/nginx/sites-enabled/xray /etc/nginx/sites-enabled/acme_temp
-    rm -rf /var/www/html/* /var/www/html/.[!.]* 2>/dev/null || true
+    [[ -d /var/www/html ]] && find /var/www/html -mindepth 1 -delete 2>/dev/null || true
     log_ok "Nginx 业务配置与站点文件已清理。"
 }
 
 driver_nginx_purge_package() {
     log_info "正在物理清退 Nginx、系统包依赖与历史日志..."
     driver_nginx_clean_site
-    if command -v nginx >/dev/null 2>&1 || [[ -f /lib/systemd/system/nginx.service ]]; then
-        apt-get purge -yqq nginx nginx-common nginx-core nginx-full socat >/dev/null 2>&1 || true
-        apt-get autoremove -yqq >/dev/null 2>&1
+    local nginx_pkgs
+    nginx_pkgs=$(dpkg-query -W -f='${Package}\n' 'nginx*' '*nginx*' 2>/dev/null | xargs)
+    if [[ -n "$nginx_pkgs" ]]; then
+        apt-get purge -yqq $nginx_pkgs >/dev/null 2>&1 || dpkg --purge --force-all $nginx_pkgs >/dev/null 2>&1 || true
+        apt-get autoremove -yqq >/dev/null 2>&1 || true
     fi
     rm -rf /etc/nginx /var/www /var/log/nginx 2>/dev/null || true
     systemctl daemon-reload >/dev/null 2>&1 || true
@@ -634,7 +655,7 @@ driver_xray_install() {
 
     local tmp_xray="/tmp/xray_build_$(date +%s)"
     CLEANUP_LIST+=("$tmp_xray")
-    mkdir -p "$tmp_xray" && cd "$tmp_xray"
+    mkdir -p "$tmp_xray" && cd "$tmp_xray" || log_err "创建临时目录失败。"
 
     local zip_name="Xray-linux-${arch_xray}.zip"
     echo -e "${C_BLUE}--- 下载 Xray 核心 ---${C_RESET}"
@@ -746,7 +767,6 @@ driver_rules_dat_purge() {
 }
 
 driver_xray_configure() {
-    local domain="${CTX[domain]}"
     log_info "正在生成 Xray 配置文件和加密密钥..."
 
     if [[ -f "$XRAY_CONFIG" ]]; then
@@ -778,7 +798,8 @@ driver_xray_configure() {
     fi
 
     if [[ -z "${CTX[priv_key]}" || "${CTX[priv_key]}" == "null" || -z "${CTX[pub_key]}" || "${CTX[pub_key]}" == "null" ]]; then
-        local key_re="$($XRAY_BIN x25519 | tr -d '\r')"
+        local key_re
+        key_re="$($XRAY_BIN x25519 | tr -d '\r')"
         mapfile -t KEYS < <(echo "$key_re" | grep -iE "Private|Public|Password" | grep -oE '[A-Za-z0-9_-]{43}')
         CTX[priv_key]=""
         CTX[pub_key]=""
@@ -930,6 +951,7 @@ driver_hysteria_install() {
     fetch_asset "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${CTX[arch]}" "$tmp_hy2/hysteria" 120 || log_err "Hysteria2 核心下载失败。"
     chmod +x "$tmp_hy2/hysteria"
     mv -f "$tmp_hy2/hysteria" "$HY2_BIN"
+    rm -rf "$tmp_hy2"
 
     mkdir -p "$HY2_CONF_DIR"
 
@@ -1204,23 +1226,25 @@ workflow_align_modes() {
     [[ "${CTX[mode]}" != "3" ]] && driver_hysteria_purge >/dev/null 2>&1
     if [[ "${CTX[mode]}" == "2" ]]; then
         driver_cert_purge >/dev/null 2>&1
-        driver_nginx_purge_package >/dev/null 2>&1
+        driver_nginx_clean_site >/dev/null 2>&1
     fi
     log_ok "无关异构资产物理擦除完毕，环境已恢复初装基线。"
 }
 
 workflow_deploy() {
     cd "$HOME" || safe_terminate 1
-    rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
-    dpkg --configure -a >/dev/null 2>&1 || true
+    if ! pgrep -x "apt|apt-get|dpkg|unattended-upgr" >/dev/null 2>&1; then
+        rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock
+        dpkg --configure -a >/dev/null 2>&1 || true
+    fi
 
     # 停止包括 watcher 在内的全部服务，消除证书覆盖期间的重启竞态
     systemctl stop xray hysteria-server hysteria-cert-watcher.path >/dev/null 2>&1 || true
     command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1 || true
 
     if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-        apt-get update -yqq >/dev/null 2>&1
-        apt-get install -yqq --no-install-recommends curl jq >/dev/null 2>&1
+        apt-get -o DPkg::Lock::Timeout=60 update -yqq >/dev/null 2>&1
+        apt-get -o DPkg::Lock::Timeout=60 install -yqq --no-install-recommends curl jq >/dev/null 2>&1
     fi
 
     local arch_raw
@@ -1237,17 +1261,25 @@ workflow_deploy() {
     sys_setup_journald
 
     local install_pkgs="curl unzip openssl jq qrencode"
-    [[ "${CTX[mode]}" =~ ^[13]$ ]] && install_pkgs="$install_pkgs nginx socat"
+    local reinstall_flag=""
+    if [[ "${CTX[mode]}" =~ ^[13]$ ]]; then
+        install_pkgs="$install_pkgs nginx socat"
+        if [[ ! -f /etc/nginx/nginx.conf || ! -f /etc/nginx/mime.types ]]; then
+            install_pkgs="$install_pkgs nginx-common"
+            reinstall_flag="--reinstall"
+        fi
+    fi
 
     log_info "正在同步软件源索引并安装模式所需的基础软件..."
-    apt-get update -yqq >/dev/null 2>&1
+    apt-get -o DPkg::Lock::Timeout=60 update -yqq >/dev/null 2>&1
 
     local apt_log="/tmp/apt_install_$$.log"
     CLEANUP_LIST+=("$apt_log")
 
-    if ! apt-get install -yqq --no-install-recommends \
+    if ! apt-get -o DPkg::Lock::Timeout=60 install -yqq $reinstall_flag --no-install-recommends \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" \
+        -o Dpkg::Options::="--force-confmiss" \
         $install_pkgs > "$apt_log" 2>&1; then
 
         echo -e "${C_RED}=================== APT 安装底层报错详情 ===================${C_RESET}"
@@ -1272,7 +1304,7 @@ workflow_deploy() {
     sys_setup_bbr
 
     if [[ "${CTX[mode]}" =~ ^[13]$ ]]; then
-        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl /var/www/html
+        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl /var/www/html /var/log/nginx
         driver_cert_install
         driver_nginx_install
         driver_cert_setup_timer
@@ -1367,7 +1399,7 @@ workflow_uninstall() {
         [yY][eE][sS]|[yY])
             driver_nginx_purge_package
             local purge_list="socat qrencode jq unzip"
-            apt-get purge -yqq $purge_list >/dev/null 2>&1
+            apt-get -o DPkg::Lock::Timeout=60 purge -yqq $purge_list >/dev/null 2>&1 || true
             sys_clean_apt_cache
             echo -e "${C_GREEN}[OK] 底层运行依赖包已彻底清除 (已保留 curl、BBR 与日志策略)。${C_RESET}"
             ;;
