@@ -52,6 +52,7 @@ declare -gA CTX=(
     [cert_mode]="--server letsencrypt"
     [port]="443"
     [reuse_config]="1"
+    [need_cert]="1"
     [hy2_pass]=""
     [ipv4]=""
     [ipv6]=""
@@ -223,9 +224,8 @@ sys_setup_bbr() {
 
 sys_clean_apt_cache() {
     log_info "正在清理安装过程中产生的系统垃圾..."
-    apt-get autoremove -yqq >/dev/null 2>&1
-    apt-get clean -yqq >/dev/null 2>&1
-    rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+    apt-get autoremove -yqq >/dev/null 2>&1 || true
+    apt-get clean -yqq >/dev/null 2>&1 || true
     log_ok "系统垃圾清理完毕。"
 }
 
@@ -233,76 +233,52 @@ sys_clean_apt_cache() {
 # LAYER 3: 业务组件驱动 (Component Lifecycle Drivers)
 # ------------------------------------------------------------------------------
 
-# --- [Driver: ACME 证书管理] ---
+# --- [Driver: Nginx 基础主配置生成 (供 Webroot 验证与正式服务复用)] ---
+driver_nginx_write_main_conf() {
+    mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled /var/log/nginx /var/www/html
+    cat > /etc/nginx/nginx.conf <<'EOF'
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+error_log /var/log/nginx/error.log notice;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    sendfile on;
+    tcp_nopush on;
+    types_hash_max_size 2048;
+    server_tokens off;
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    ssl_session_tickets off;
+    access_log off;
+    gzip on;
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
+}
+EOF
+    rm -f /etc/nginx/sites-enabled/default
+}
+
+# --- [Driver: ACME 证书管理 (极简稳定版)] ---
 driver_cert_install() {
     local domain="${CTX[domain]}"
-    local api="${CTX[dns_api]}"
     local cert_file="/etc/nginx/ssl/${domain}_ecc.cer"
     local key_file="/etc/nginx/ssl/${domain}_ecc.key"
-    local domains="${CTX[domains]}"
-    local primary_domain
-    primary_domain=$(echo "$domains" | awk '{print $1}')
-    local acme_args=""
-    for d in $domains; do
-        acme_args="$acme_args -d $d"
-    done
 
-    # 检测并清理与当前输入域名不一致的历史域名证书资产与续签配置
-    if [[ -d /etc/nginx/ssl ]]; then
-        local f old_d
-        for f in /etc/nginx/ssl/*_ecc.cer /etc/nginx/ssl/*_ecc.key; do
-            [[ -e "$f" ]] || continue
-            old_d=$(basename "$f")
-            old_d="${old_d%_ecc.cer}"
-            old_d="${old_d%_ecc.key}"
-            if [[ "$old_d" != "$domain" ]]; then
-                log_info "检测到域名变更，正在清理旧域名证书资产 ($old_d)..."
-                [[ -x "$ACME_BIN" ]] && "$ACME_BIN" --remove -d "$old_d" --ecc >/dev/null 2>&1 || true
-                rm -rf "/root/.acme.sh/${old_d}_ecc" 2>/dev/null || true
-                rm -f "/etc/nginx/ssl/${old_d}_ecc.cer" "/etc/nginx/ssl/${old_d}_ecc.key" 2>/dev/null || true
-            fi
-        done
-    fi
-    if [[ -d /root/.acme.sh ]]; then
-        local ecc_dir old_main_domain
-        for ecc_dir in /root/.acme.sh/*_ecc; do
-            [[ -d "$ecc_dir" ]] || continue
-            old_main_domain=$(basename "$ecc_dir")
-            old_main_domain="${old_main_domain%_ecc}"
-            if [[ "$old_main_domain" != "$primary_domain" ]]; then
-                log_info "检测到域名变更，正在清理旧域名 ACME 续签目录 ($old_main_domain)..."
-                [[ -x "$ACME_BIN" ]] && "$ACME_BIN" --remove -d "$old_main_domain" --ecc >/dev/null 2>&1 || true
-                rm -rf "$ecc_dir" 2>/dev/null || true
-            fi
-        done
-    fi
-
-    local force_issue=""
-    if [[ -s "$cert_file" && -s "$key_file" ]]; then
-        local cert_issuer san_text san_missing=0
-        cert_issuer=$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null || true)
-        san_text=$(openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null || true)
-        for d in $domains; do
-            if ! echo "$san_text" | grep -Eiq "DNS:[[:space:]]*${d}(,|$|[[:space:]])"; then
-                san_missing=1
-                break
-            fi
-        done
-
-        if [[ "${CTX[cert_mode]}" != "--staging" ]] && echo "$cert_issuer" | grep -qiE "staging|fake"; then
-            log_warn "检测到现有证书为 Staging 测试证书，即将清除并重新申请 Production 正式证书..."
-            rm -f "$cert_file" "$key_file"
-            rm -rf "/root/.acme.sh/${primary_domain}_ecc" 2>/dev/null || true
-            force_issue="--force"
-        elif [[ $san_missing -eq 1 ]]; then
-            log_warn "检测到域名列表变更 ($domains)，现有证书 SAN 未完全覆盖，即将重新申请证书..."
-            rm -f "$cert_file" "$key_file"
-            rm -rf "/root/.acme.sh/${primary_domain}_ecc" 2>/dev/null || true
-            force_issue="--force"
-        else
-            log_info "检测到服务器已存在有效证书，跳过申请步骤直接复用。"
-            return 0
-        fi
+    # 本地有效证书直接复用，0 网络损耗
+    if [[ "${CTX[need_cert]}" == "0" && -s "$cert_file" && -s "$key_file" ]]; then
+        log_ok "检测到本地已有完整证书 ($domain)，跳过证书签发流程。"
+        return 0
     fi
 
     log_info "正在向 Let's Encrypt 申请 TLS 证书 ($domain)..."
@@ -317,7 +293,13 @@ driver_cert_install() {
         log_err "证书申请工具安装失败，请检查网络连接。"
     fi
 
-    if [[ "$api" == "webroot" ]]; then
+    local acme_args=""
+    for d in ${CTX[domains]}; do
+        acme_args="$acme_args -d $d"
+    done
+
+    if [[ "${CTX[dns_api]}" == "webroot" ]]; then
+        driver_nginx_write_main_conf
         local acme_temp_conf="/etc/nginx/sites-enabled/acme_temp"
         CLEANUP_LIST+=("$acme_temp_conf")
         rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/xray
@@ -325,26 +307,30 @@ driver_cert_install() {
 server {
     listen 80;
     listen [::]:80;
-    server_name $domains;
+    server_name ${CTX[domains]};
     location / { root /var/www/html; }
 }
 EOF
-        systemctl restart nginx >/dev/null 2>&1 || systemctl start nginx >/dev/null 2>&1
-        "$ACME_BIN" --issue $acme_args --webroot /var/www/html --keylength ec-256 ${CTX[cert_mode]} $force_issue
+        systemctl restart nginx >/dev/null 2>&1 || log_err "Nginx 临时验证服务启动失败，请检查 80 端口占用。"
+        "$ACME_BIN" --issue $acme_args --webroot /var/www/html --keylength ec-256 ${CTX[cert_mode]} || true
         rm -f "$acme_temp_conf"
     else
-        "$ACME_BIN" --issue --dns "$api" $acme_args --keylength ec-256 ${CTX[cert_mode]} $force_issue
+        "$ACME_BIN" --issue --dns "${CTX[dns_api]}" $acme_args --keylength ec-256 ${CTX[cert_mode]} || true
     fi
 
+    cd "$HOME" || true
+    rm -rf "$tmp_acme" 2>/dev/null || true
+
     mkdir -p /etc/nginx/ssl
+    local primary_domain
+    primary_domain=$(echo "${CTX[domains]}" | awk '{print $1}')
+
     "$ACME_BIN" --install-cert -d "$primary_domain" --ecc \
         --key-file "$key_file" \
         --fullchain-file "$cert_file" \
-        --reloadcmd "systemctl reload nginx || true"
+        --reloadcmd "systemctl reload nginx || true" >/dev/null 2>&1
 
-    cd "$HOME" || true
-
-    if [[ -s "$cert_file" ]]; then
+    if [[ -s "$cert_file" && -s "$key_file" ]]; then
         log_ok "TLS 证书申请成功并部署到 Nginx。"
         local acme_conf="/root/.acme.sh/account.conf"
         if [[ -f "$acme_conf" ]]; then
@@ -405,37 +391,7 @@ driver_nginx_install() {
     fi
 
     log_info "正在配置 Nginx 主程序..."
-    cat > /etc/nginx/nginx.conf <<'EOF'
-user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-error_log /var/log/nginx/error.log notice;
-include /etc/nginx/modules-enabled/*.conf;
-
-events {
-    worker_connections 1024;
-}
-
-http {
-    sendfile on;
-    tcp_nopush on;
-    types_hash_max_size 2048;
-    server_tokens off;
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-    ssl_session_tickets off;
-    access_log off;
-    gzip on;
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
-}
-EOF
-    rm -f /etc/nginx/sites-enabled/default
+    driver_nginx_write_main_conf
 
     log_info "正在配置 Nginx 伪装网站和安全策略..."
     local has_reject=0
@@ -617,9 +573,11 @@ driver_nginx_clean_site() {
 driver_nginx_purge_package() {
     log_info "正在物理清退 Nginx、系统包依赖与历史日志..."
     driver_nginx_clean_site
-    if command -v nginx >/dev/null 2>&1 || [[ -f /lib/systemd/system/nginx.service ]]; then
-        apt-get purge -yqq nginx nginx-common nginx-core nginx-full socat >/dev/null 2>&1 || true
-        apt-get autoremove -yqq >/dev/null 2>&1
+    local nginx_pkgs
+    nginx_pkgs=$(dpkg-query -W -f='${Package}\n' 'nginx*' '*nginx*' 2>/dev/null | xargs)
+    if [[ -n "$nginx_pkgs" ]]; then
+        apt-get purge -yqq $nginx_pkgs >/dev/null 2>&1 || dpkg --purge --force-all $nginx_pkgs >/dev/null 2>&1 || true
+        apt-get autoremove -yqq >/dev/null 2>&1 || true
     fi
     rm -rf /etc/nginx /var/www /var/log/nginx 2>/dev/null || true
     systemctl daemon-reload >/dev/null 2>&1 || true
@@ -1136,57 +1094,67 @@ workflow_get_inputs() {
 
         workflow_select_port
 
-        echo -e "${C_BOLD}${C_BLUE}--- [步骤 2/3] 选择证书验证方式 ---${C_RESET}"
-        echo -e "  1. DNS API 验证机制 (推荐) - 静默验证，支持泛域名，无惧端口被封。"
-        echo -e "  2. HTTP Webroot 机制       - 依赖 Nginx 80 端口无感验证。"
-        local VERIFY_TYPE
-        while true; do
-            read -rp "请选择 [1/2, 默认 1]: " VERIFY_TYPE
-            VERIFY_TYPE=${VERIFY_TYPE:-1}
-            [[ "$VERIFY_TYPE" =~ ^[12]$ ]] && break
-            log_warn "输入无效，请输入 1 或 2。"
-        done
-
-        if [[ "$VERIFY_TYPE" == "2" ]]; then
-            CTX[dns_api]="webroot"
-        else
-            echo -e "\n  1. Cloudflare\n  2. Namesilo"
-            local DNS_TYPE
-            while true; do
-                read -rp "请选择你的域名服务商 [1/2, 默认 1]: " DNS_TYPE
-                DNS_TYPE=${DNS_TYPE:-1}
-                [[ "$DNS_TYPE" =~ ^[12]$ ]] && break
-                log_warn "输入无效，请输入 1 或 2。"
-            done
-            if [[ "$DNS_TYPE" == "1" ]]; then
-                CTX[dns_api]="dns_cf"
-                read -rp "输入 Cloudflare API Token: " CTX[cf_token]
-                read -rp "输入 Cloudflare Zone ID: " CTX[cf_zone_id]
-                export CF_Token=${CTX[cf_token]}
-                export CF_Zone_ID=${CTX[cf_zone_id]}
-            else
-                CTX[dns_api]="dns_namesilo"
-                read -rp "输入 Namesilo API Key: " CTX[namesilo_key]
-                export Namesilo_Key=${CTX[namesilo_key]}
-            fi
+        CTX[need_cert]="1"
+        local cert_file="/etc/nginx/ssl/${CTX[domain]}_ecc.cer"
+        local key_file="/etc/nginx/ssl/${CTX[domain]}_ecc.key"
+        if [[ -s "$cert_file" && -s "$key_file" ]] && openssl x509 -in "$cert_file" -checkend 2592000 >/dev/null 2>&1; then
+            echo -e "${C_GREEN}[OK] 本地已存在该域名的有效证书 (剩余有效期 > 30 天)，将自动复用，跳过证书申请向导。${C_RESET}\n"
+            CTX[need_cert]="0"
         fi
 
-        echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 3/3] 选择证书申请环境 ---${C_RESET}"
-        echo -e "  1. Production (生产环境) - 颁发正规信任证书 (有频次限制)。"
-        echo -e "  2. Staging    (测试环境) - 无次数限制，专用于调试排错。"
-        local CERT_MODE_INPUT
-        while true; do
-            read -rp "请选择 [1/2, 默认 1]: " CERT_MODE_INPUT
-            CERT_MODE_INPUT=${CERT_MODE_INPUT:-1}
-            [[ "$CERT_MODE_INPUT" =~ ^[12]$ ]] && break
-            log_warn "输入无效，请输入 1 或 2。"
-        done
-        if [[ "$CERT_MODE_INPUT" == "2" ]]; then
-            CTX[cert_mode]="--staging"
-            log_warn "当前选择：Staging 测试环境。"
-        else
-            CTX[cert_mode]="--server letsencrypt"
-            log_info "当前选择：Production 生产环境。"
+        if [[ "${CTX[need_cert]}" == "1" ]]; then
+            echo -e "${C_BOLD}${C_BLUE}--- [步骤 2/3] 选择证书验证方式 ---${C_RESET}"
+            echo -e "  1. DNS API 验证机制 (推荐) - 静默验证，支持泛域名，无惧端口被封。"
+            echo -e "  2. HTTP Webroot 机制       - 依赖 Nginx 80 端口无感验证。"
+            local VERIFY_TYPE
+            while true; do
+                read -rp "请选择 [1/2, 默认 1]: " VERIFY_TYPE
+                VERIFY_TYPE=${VERIFY_TYPE:-1}
+                [[ "$VERIFY_TYPE" =~ ^[12]$ ]] && break
+                log_warn "输入无效，请输入 1 或 2。"
+            done
+
+            if [[ "$VERIFY_TYPE" == "2" ]]; then
+                CTX[dns_api]="webroot"
+            else
+                echo -e "\n  1. Cloudflare\n  2. Namesilo"
+                local DNS_TYPE
+                while true; do
+                    read -rp "请选择你的域名服务商 [1/2, 默认 1]: " DNS_TYPE
+                    DNS_TYPE=${DNS_TYPE:-1}
+                    [[ "$DNS_TYPE" =~ ^[12]$ ]] && break
+                    log_warn "输入无效，请输入 1 或 2。"
+                done
+                if [[ "$DNS_TYPE" == "1" ]]; then
+                    CTX[dns_api]="dns_cf"
+                    read -rp "输入 Cloudflare API Token: " CTX[cf_token]
+                    read -rp "输入 Cloudflare Zone ID: " CTX[cf_zone_id]
+                    export CF_Token=${CTX[cf_token]}
+                    export CF_Zone_ID=${CTX[cf_zone_id]}
+                else
+                    CTX[dns_api]="dns_namesilo"
+                    read -rp "输入 Namesilo API Key: " CTX[namesilo_key]
+                    export Namesilo_Key=${CTX[namesilo_key]}
+                fi
+            fi
+
+            echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 3/3] 选择证书申请环境 ---${C_RESET}"
+            echo -e "  1. Production (生产环境) - 颁发正规信任证书 (有频次限制)。"
+            echo -e "  2. Staging    (测试环境) - 无次数限制，专用于调试排错。"
+            local CERT_MODE_INPUT
+            while true; do
+                read -rp "请选择 [1/2, 默认 1]: " CERT_MODE_INPUT
+                CERT_MODE_INPUT=${CERT_MODE_INPUT:-1}
+                [[ "$CERT_MODE_INPUT" =~ ^[12]$ ]] && break
+                log_warn "输入无效，请输入 1 或 2。"
+            done
+            if [[ "$CERT_MODE_INPUT" == "2" ]]; then
+                CTX[cert_mode]="--staging"
+                log_warn "当前选择：Staging 测试环境。"
+            else
+                CTX[cert_mode]="--server letsencrypt"
+                log_info "当前选择：Production 生产环境。"
+            fi
         fi
     else
         echo -e "\n${C_BOLD}${C_BLUE}--- [步骤 1/2] 设置伪装域名 (SNI) ---${C_RESET}"
@@ -1204,7 +1172,7 @@ workflow_align_modes() {
     [[ "${CTX[mode]}" != "3" ]] && driver_hysteria_purge >/dev/null 2>&1
     if [[ "${CTX[mode]}" == "2" ]]; then
         driver_cert_purge >/dev/null 2>&1
-        driver_nginx_purge_package >/dev/null 2>&1
+        driver_nginx_clean_site >/dev/null 2>&1
     fi
     log_ok "无关异构资产物理擦除完毕，环境已恢复初装基线。"
 }
@@ -1237,7 +1205,14 @@ workflow_deploy() {
     sys_setup_journald
 
     local install_pkgs="curl unzip openssl jq qrencode"
-    [[ "${CTX[mode]}" =~ ^[13]$ ]] && install_pkgs="$install_pkgs nginx socat"
+    local reinstall_flag=""
+    if [[ "${CTX[mode]}" =~ ^[13]$ ]]; then
+        install_pkgs="$install_pkgs nginx socat"
+        if [[ ! -f /etc/nginx/nginx.conf || ! -f /etc/nginx/mime.types ]]; then
+            install_pkgs="$install_pkgs nginx-common"
+            reinstall_flag="--reinstall"
+        fi
+    fi
 
     log_info "正在同步软件源索引并安装模式所需的基础软件..."
     apt-get update -yqq >/dev/null 2>&1
@@ -1245,9 +1220,10 @@ workflow_deploy() {
     local apt_log="/tmp/apt_install_$$.log"
     CLEANUP_LIST+=("$apt_log")
 
-    if ! apt-get install -yqq --no-install-recommends \
+    if ! apt-get install -yqq $reinstall_flag --no-install-recommends \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" \
+        -o Dpkg::Options::="--force-confmiss" \
         $install_pkgs > "$apt_log" 2>&1; then
 
         echo -e "${C_RED}=================== APT 安装底层报错详情 ===================${C_RESET}"
@@ -1272,7 +1248,7 @@ workflow_deploy() {
     sys_setup_bbr
 
     if [[ "${CTX[mode]}" =~ ^[13]$ ]]; then
-        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl /var/www/html
+        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl /var/www/html /var/log/nginx
         driver_cert_install
         driver_nginx_install
         driver_cert_setup_timer
