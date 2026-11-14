@@ -840,7 +840,7 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now xray-dat.timer >/dev/null 2>&1
-    log_ok "增强版分流规则库部署与定时更新任务配置完成。"
+    log_ok "分流规则库更新与定时更新任务配置完成。"
 }
 
 driver_rules_dat_purge() {
