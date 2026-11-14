@@ -772,7 +772,7 @@ EOF
 
 # --- [Driver: 路由分流规则自动化更新] ---
 driver_rules_dat_setup() {
-    log_info "正在配置增强版分流规则库与自动更新任务..."
+    log_info "正在配置分流规则库与自动更新任务..."
     mkdir -p "$SCRIPT_DIR" "$XRAY_SHARE_DIR"
     cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
 #!/bin/bash
@@ -837,7 +837,7 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now xray-dat.timer >/dev/null 2>&1
-    log_ok "增强版分流规则库部署与定时更新任务配置完成。"
+    log_ok "分流规则库部署与定时更新任务配置完成。"
 }
 
 driver_rules_dat_purge() {
