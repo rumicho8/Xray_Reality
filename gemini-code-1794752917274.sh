@@ -589,7 +589,7 @@ EOF
     "$ACME_BIN" --install-cert -d "$domain" --ecc \
         --key-file "$key_file" \
         --fullchain-file "$cert_file" \
-        --reloadcmd "$reload_cmd" >/dev/null 2>&1 || log_err "证书安装或重载钩子执行失败。"
+        --reloadcmd "$reload_cmd" || log_err "证书安装或重载钩子执行失败。"
 
     verify_cert_health "$cert_file" "$key_file" "$domain" 2592000 || log_err "证书安装后加密学健康校验失败（证书过期、域名不匹配或公私钥不配对）。"
     log_ok "TLS 证书加密学校验通过并已部署到 Nginx。"
@@ -883,7 +883,7 @@ EOF
 
 # --- [Driver: 路由分流规则自动化更新] ---
 driver_rules_dat_setup() {
-    log_info "正在配置分流规则库与自动更新任务..."
+    log_info "正在配置增强版分流规则库与自动更新任务..."
     mkdir -p "$SCRIPT_DIR" "$XRAY_SHARE_DIR"
     cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
 #!/bin/bash
@@ -946,7 +946,7 @@ WantedBy=timers.target
 EOF
 
     timer_enable_verify "xray-dat.timer" "分流规则自动更新定时器"
-    log_ok "分流规则库部署与定时更新任务配置完成。"
+    log_ok "增强版分流规则库部署与定时更新任务配置完成。"
 }
 
 driver_rules_dat_purge() {
