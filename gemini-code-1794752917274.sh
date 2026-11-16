@@ -46,7 +46,10 @@ export DEBIAN_FRONTEND="noninteractive"
 export APT_LISTCHANGES_FRONTEND="none"
 
 declare -gA CTX=()
+APT_UPDATED=0
+
 reset_context() {
+    APT_UPDATED=0
     CTX=(
         [mode]="1"
         [domain]=""
@@ -157,23 +160,43 @@ timer_enable_verify() {
     systemctl is-active --quiet "$unit" || log_err "${desc} (${unit}) 未处于 active 状态。"
 }
 
+is_pkg_installed() {
+    dpkg -s "$1" 2>/dev/null | grep -qw "install ok installed"
+}
+
 sys_precheck_env() {
     # 安全自愈未完成的 dpkg 配置（探测全部三个锁文件，绝不暴力 rm 锁文件）
     if flock -n /var/lib/dpkg/lock-frontend true >/dev/null 2>&1 && \
        flock -n /var/lib/dpkg/lock true >/dev/null 2>&1 && \
        flock -n /var/cache/apt/archives/lock true >/dev/null 2>&1; then
-        dpkg --configure -a >/dev/null 2>&1 || true
+        dpkg --configure -a >/dev/null 2>&1 || log_warn "dpkg 自愈配置返回非零状态，后续 APT 步骤将做进一步校验。"
     fi
 
-    # 仅在命令缺失时按需补齐基础预检工具
-    local pre_pkgs=""
-    command -v curl >/dev/null 2>&1 || pre_pkgs="$pre_pkgs curl"
-    command -v jq >/dev/null 2>&1   || pre_pkgs="$pre_pkgs jq"
-    command -v ss >/dev/null 2>&1   || pre_pkgs="$pre_pkgs iproute2"
+    # 仅在命令缺失时按需补齐基础预检工具（已有则完全跳过）
+    local pre_pkgs=()
+    command -v curl >/dev/null 2>&1 || pre_pkgs+=("curl")
+    command -v jq >/dev/null 2>&1   || pre_pkgs+=("jq")
+    command -v ss >/dev/null 2>&1   || pre_pkgs+=("iproute2")
 
-    if [[ -n "$pre_pkgs" ]]; then
-        apt-get -o DPkg::Lock::Timeout=60 update -yqq >/dev/null 2>&1
-        apt-get -o DPkg::Lock::Timeout=60 install -yqq --no-install-recommends $pre_pkgs >/dev/null 2>&1
+    if [[ ${#pre_pkgs[@]} -gt 0 ]]; then
+        log_info "正在按需安装缺失的预检工具 (${pre_pkgs[*]})..."
+        if apt-get -o DPkg::Lock::Timeout=60 update -yqq >/dev/null 2>&1; then
+            APT_UPDATED=1
+        else
+            log_warn "预检阶段软件源索引更新返回异常，尝试继续安装..."
+        fi
+        if ! apt-get -o DPkg::Lock::Timeout=60 install -yqq --no-install-recommends "${pre_pkgs[@]}" >/dev/null 2>&1; then
+            log_warn "预检工具 APT 安装返回异常，正在核验核心命令可用性..."
+        fi
+    fi
+
+    # 严格校验预检命令是否全部就绪，防止缺失 ss/jq/curl 状态下带病进入交互阶段
+    local missing_cmds=()
+    for cmd in curl jq ss; do
+        command -v "$cmd" >/dev/null 2>&1 || missing_cmds+=("$cmd")
+    done
+    if [[ ${#missing_cmds[@]} -gt 0 ]]; then
+        log_err "预检依赖工具安装失败，缺失核心命令: [ ${missing_cmds[*]} ]，请检查系统 APT 软件源或网络连接。"
     fi
 
     local arch_raw
@@ -186,47 +209,100 @@ sys_precheck_env() {
 }
 
 sys_install_apt_pkgs() {
-    local install_pkgs="curl unzip openssl jq qrencode"
-    local reinstall_flag=""
+    mkdir -p "$SCRIPT_DIR"
+
+    # 1. 组装当前模式所需的目标软件包列表（curl 与 jq 已在预检阶段确保就绪，无需重复列入）
+    local required_pkgs=("unzip" "openssl" "qrencode")
     if [[ "${CTX[mode]}" =~ ^[13]$ ]]; then
-        install_pkgs="$install_pkgs nginx socat"
-        if [[ ! -f /etc/nginx/nginx.conf || ! -f /etc/nginx/mime.types || ! -d /etc/nginx/modules-enabled ]]; then
-            local installed_ngx_sub
-            installed_ngx_sub=$(dpkg-query -W -f='${Package} ' 'nginx-*' 'libnginx-mod-*' 2>/dev/null || true)
-            install_pkgs="$install_pkgs nginx-common $installed_ngx_sub"
-            reinstall_flag="--reinstall"
+        required_pkgs+=("nginx" "socat")
+    fi
+
+    # 2. 逐个筛查：仅将系统尚未安装的包加入待安装列表，已安装的直接跳过
+    local missing_pkgs=()
+    local pkg
+    for pkg in "${required_pkgs[@]}"; do
+        is_pkg_installed "$pkg" || missing_pkgs+=("$pkg")
+    done
+
+    # 3. 独立检测：当 Nginx (含官方源 nginx 或 Debian 拆分包 nginx-common) 已安装，但核心配置缺失时，精准提取“已安装”的子包进行恢复
+    local repair_ngx_pkgs=()
+    if [[ "${CTX[mode]}" =~ ^[13]$ ]] && { is_pkg_installed "nginx" || is_pkg_installed "nginx-common"; }; then
+        if [[ ! -f /etc/nginx/nginx.conf || ! -f /etc/nginx/mime.types ]]; then
+            log_warn "检测到 Nginx 软件包已安装但核心配置文件缺失，即将执行配置恢复..."
+            # 严格过滤 Status 为 installed 的包，彻底排除 unknown ok not-installed 的互斥冲突包
+            mapfile -t repair_ngx_pkgs < <(dpkg-query -W -f='${Package} ${Status}\n' 'nginx' 'nginx-*' 'libnginx-mod-*' 2>/dev/null | awk '$4=="installed"{print $1}')
         fi
     fi
 
-    log_info "正在同步软件源索引并安装模式所需的基础软件..."
-    apt-get -o DPkg::Lock::Timeout=60 update -yqq >/dev/null 2>&1
+    # 将所有已就绪的依赖标记为 manual，防止被部署末尾的 apt-get autoremove 误当作孤立依赖卸载
+    apt-mark manual curl jq iproute2 "${required_pkgs[@]}" >/dev/null 2>&1 || true
+
+    # 4. 如果没有任何缺失包，且 Nginx 配置也完好无损，直接 0 耗时跳过 APT 阶段
+    if [[ ${#missing_pkgs[@]} -eq 0 && ${#repair_ngx_pkgs[@]} -eq 0 ]]; then
+        [[ "${CTX[mode]}" =~ ^[13]$ ]] && mkdir -p /etc/nginx/modules-enabled
+        log_ok "所有运行依赖包与基础配置均已存在且完整，跳过 APT 安装。"
+        return 0
+    fi
 
     local apt_log="/tmp/apt_install_$$.log"
     CLEANUP_LIST+=("$apt_log")
+    : > "$apt_log"
+    local apt_failed=0
 
-    if ! apt-get -o DPkg::Lock::Timeout=60 install -yqq $reinstall_flag --no-install-recommends \
-        -o Dpkg::Options::="--force-confdef" \
-        -o Dpkg::Options::="--force-confold" \
-        -o Dpkg::Options::="--force-confmiss" \
-        $install_pkgs > "$apt_log" 2>&1; then
-
-        echo -e "${C_RED}=================== APT 安装底层报错详情 ===================${C_RESET}"
-        grep -iE "E:|Err:|Error|dpkg:|failed" "$apt_log" 2>/dev/null || tail -n 15 "$apt_log"
-        echo -e "${C_RED}============================================================${C_RESET}"
-
-        local missing_pkgs=()
-        for pkg in $install_pkgs; do
-            if ! dpkg -s "$pkg" >/dev/null 2>&1 || ! dpkg -s "$pkg" | grep -qw "Status: install ok installed"; then
-                missing_pkgs+=("$pkg")
-            fi
-        done
-
-        rm -f "$apt_log"
-        log_err "基础软件安装未通过！未就绪的依赖组件: [ ${missing_pkgs[*]} ]，请根据上方红框内的错误原因修复系统环境。"
+    # 若预检阶段未更新过软件源，则在此处同步一次，并将报错记录到 apt_log
+    if [[ $APT_UPDATED -eq 0 ]]; then
+        log_info "正在同步软件源索引并按需补齐依赖组件..."
+        if apt-get -o DPkg::Lock::Timeout=60 update -yqq >> "$apt_log" 2>&1; then
+            APT_UPDATED=1
+        else
+            log_warn "软件源索引更新出现告警，尝试继续安装依赖组件..."
+        fi
     fi
+
+    # 5. 常规安装缺失的软件包（绝不加 --reinstall，不触碰已有软件）
+    if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
+        log_info "正在按需安装缺失组件: ${missing_pkgs[*]}"
+        if ! apt-get -o DPkg::Lock::Timeout=60 install -yqq --no-install-recommends \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
+            -o Dpkg::Options::="--force-confmiss" \
+            "${missing_pkgs[@]}" >> "$apt_log" 2>&1; then
+            apt_failed=1
+        fi
+    fi
+
+    # 6. 仅在 Nginx 配置文件丢失时，单独对实际已安装的 Nginx 子包执行 --reinstall 恢复默认配置
+    if [[ $apt_failed -eq 0 && ${#repair_ngx_pkgs[@]} -gt 0 ]]; then
+        log_info "正在重装恢复缺失的 Nginx 配置文件: ${repair_ngx_pkgs[*]}"
+        if ! apt-get -o DPkg::Lock::Timeout=60 install -yqq --reinstall --no-install-recommends \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
+            -o Dpkg::Options::="--force-confmiss" \
+            "${repair_ngx_pkgs[@]}" >> "$apt_log" 2>&1; then
+            apt_failed=1
+        fi
+    fi
+
+    # 7. 严格核验软件包安装状态与 Nginx 核心配置文件完整性
+    local still_missing=()
+    for pkg in "${required_pkgs[@]}"; do
+        is_pkg_installed "$pkg" || still_missing+=("$pkg")
+    done
+    if [[ "${CTX[mode]}" =~ ^[13]$ ]]; then
+        mkdir -p /etc/nginx/modules-enabled 2>/dev/null || true
+        [[ -f /etc/nginx/nginx.conf && -f /etc/nginx/mime.types ]] || still_missing+=("nginx-config(/etc/nginx/mime.types)")
+    fi
+
+    if [[ $apt_failed -ne 0 || ${#still_missing[@]} -gt 0 ]]; then
+        echo -e "${C_RED}=================== APT 安装底层报错详情 ===================${C_RESET}"
+        grep -iE "E:|Err:|Error|dpkg:|failed|Conflicts" "$apt_log" 2>/dev/null || tail -n 15 "$apt_log"
+        echo -e "${C_RED}============================================================${C_RESET}"
+        rm -f "$apt_log"
+        log_err "基础软件安装未通过！未就绪的依赖组件: [ ${still_missing[*]:-apt-error} ]，请根据上方错误原因修复系统环境。"
+    fi
+
     rm -f "$apt_log"
-    mkdir -p "$SCRIPT_DIR"
-    log_ok "基础软件及目录准备完毕 (已就绪: $(echo $install_pkgs | tr ' ' ', '))。"
+    log_ok "基础软件及目录按需准备完毕 (当前模式就绪组件: ${required_pkgs[*]})。"
 }
 
 sys_setup_journald() {
@@ -357,7 +433,7 @@ cert_purge_domain() {
 
 # --- [Driver: Nginx 基础配置初始化，供证书验证与正式部署共用] ---
 driver_nginx_write_main_conf() {
-    mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl \
+    mkdir -p /etc/nginx/conf.d /etc/nginx/modules-enabled /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/ssl \
              "$NGINX_ACME_HOOK_DIR" /var/log/nginx /var/www/html "$WEBROOT_ACME_DIR"
     chmod 755 /var/www/html "$WEBROOT_ACME_DIR" "$NGINX_ACME_HOOK_DIR"
     cat > /etc/nginx/nginx.conf <<'EOF'
@@ -786,14 +862,22 @@ EOF
         if unzip -qo "$zip_file" -d "$temp_extract"; then
             local inner_dir
             inner_dir=$(find "$temp_extract" -mindepth 1 -maxdepth 1 -type d | head -n1)
-            [[ -n "$inner_dir" ]] && cp -a "$inner_dir"/. "$target_dir/" 2>/dev/null
-            log_ok "伪装网页部署成功。"
-            echo "--------------------"
+            if [[ -n "$inner_dir" ]] && cp -a "$inner_dir"/. "$target_dir/" 2>/dev/null && [[ -s "$target_dir/index.html" ]]; then
+                log_ok "伪装网页部署成功。"
+            else
+                log_warn "伪装网页目录结构异常或拷贝失败，未找到有效的 index.html。"
+            fi
+        else
+            log_warn "伪装网页压缩包解压失败。"
         fi
-        rm -rf "$temp_extract" "$zip_file" 2>/dev/null || true
+    else
+        log_warn "伪装网页模板从 GitHub 下载失败或超时。"
     fi
+    rm -rf "$temp_extract" "$zip_file" 2>/dev/null || true
+    echo "--------------------"
 
     if [[ ! -s "$target_dir/index.html" ]]; then
+        log_warn "已降级启用内置 403 Forbidden 静态页面作为伪装兜底（不影响节点正常使用）。"
         cat > "$target_dir/index.html" <<'EOF'
 <!DOCTYPE html><html><head><title>403 Forbidden</title></head><body style="background-color:black;color:white;text-align:center;padding-top:20%"><p>403 Forbidden</p><hr><p>nginx</p></body></html>
 EOF
@@ -820,7 +904,7 @@ driver_nginx_purge_package() {
     log_info "正在物理清退 Nginx、系统包依赖与历史日志..."
     driver_nginx_clean_site
     local nginx_pkgs
-    nginx_pkgs=$(dpkg-query -W -f='${Package}\n' 'nginx*' '*nginx*' 2>/dev/null | xargs)
+    nginx_pkgs=$(dpkg-query -W -f='${Package} ${db:Status-Status}\n' 'nginx*' '*nginx*' 2>/dev/null | awk '$2=="installed" || $2=="config-files"{print $1}' | xargs)
     if [[ -n "$nginx_pkgs" ]]; then
         apt-get -o DPkg::Lock::Timeout=60 purge -yqq $nginx_pkgs >/dev/null 2>&1 || dpkg --purge --force-all $nginx_pkgs >/dev/null 2>&1 || true
         apt-get -o DPkg::Lock::Timeout=60 autoremove -yqq >/dev/null 2>&1 || true
@@ -881,44 +965,86 @@ EOF
     log_ok "Xray 核心与系统服务单元准备就绪。"
 }
 
-# --- [Driver: 路由分流规则自动化更新] ---
+# --- [Driver: 路由分流规则自动化更新 (整体原子事务 + SHA256 严格校验)] ---
 driver_rules_dat_setup() {
     log_info "正在配置增强版分流规则库与自动更新任务..."
     mkdir -p "$SCRIPT_DIR" "$XRAY_SHARE_DIR"
     cat > "$SCRIPT_DIR/update-dat.sh" <<'EOF'
 #!/bin/bash
 exec 9> /var/lock/xray-dat.lock
-flock -n 9 || exit 0
-SHARE_DIR="/usr/local/share/xray"
-mkdir -p "$SHARE_DIR"
-changed=0
+if ! flock -n 9; then
+    echo -e "\e[33m[WARN]\e[0m 检测到已有分流规则更新任务正在运行 (锁占用)，跳过本次同步。"
+    exit 1
+fi
 
-update_file() {
-    local f=$1; local u=$2
-    local target_tmp="$SHARE_DIR/${f}.new"
-    if curl -fL --max-time 300 --connect-timeout 60 --retry 5 --retry-delay 3 --retry-connrefused -o "$target_tmp" "$u" && [[ -s "$target_tmp" ]]; then
-        local f_size
-        f_size=$(stat -c%s "$target_tmp" 2>/dev/null || wc -c < "$target_tmp" 2>/dev/null | tr -d ' ' || echo 0)
-        if [[ "$f_size" -ge 512000 ]] && ! cmp -s "$target_tmp" "$SHARE_DIR/$f"; then
-            mv -f "$target_tmp" "$SHARE_DIR/$f"
-            changed=1
-            return 0
-        fi
-    fi
-    rm -f "$target_tmp"
-    return 1
+SHARE_DIR="/usr/local/share/xray"
+STAGE_DIR="$SHARE_DIR/.staging"
+BASE_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
+
+cleanup_stage() {
+    rm -rf "$STAGE_DIR" 2>/dev/null || true
+}
+trap 'cleanup_stage' EXIT
+
+mkdir -p "$SHARE_DIR"
+rm -rf "$STAGE_DIR" 2>/dev/null || true
+mkdir -p "$STAGE_DIR"
+
+download_and_verify() {
+    local f="$1"
+    local stage_dat="$STAGE_DIR/$f"
+    local stage_sum="$STAGE_DIR/${f}.sha256sum"
+
+    # 下载规则文件与对应的官方 SHA256 校验文件
+    curl -fL --max-time 300 --connect-timeout 60 --retry 5 --retry-delay 3 --retry-connrefused -o "$stage_dat" "$BASE_URL/$f" || return 1
+    curl -fL --max-time 30  --connect-timeout 15 --retry 3 --retry-delay 2 --retry-connrefused -o "$stage_sum" "$BASE_URL/${f}.sha256sum" || return 1
+    [[ -s "$stage_dat" && -s "$stage_sum" ]] || return 1
+
+    # 提取 64 位十六进制哈希并执行 SHA256 严格比对
+    local expected_hash actual_hash
+    expected_hash=$(awk '{print $1}' "$stage_sum" 2>/dev/null | tr '[:upper:]' '[:lower:]' | head -n1)
+    actual_hash=$(sha256sum "$stage_dat" 2>/dev/null | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+    [[ "$expected_hash" =~ ^[0-9a-f]{64}$ && "$expected_hash" == "$actual_hash" ]] || return 1
+
+    return 0
 }
 
-update_file "geoip.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-update_file "geosite.dat" "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+# 1-3. 分别下载 geoip.dat / geosite.dat 及对应 SHA256 文件并执行校验（任一失败则整体中止，保留原有文件）
+if ! download_and_verify "geoip.dat" || ! download_and_verify "geosite.dat"; then
+    exit 1
+fi
 
-# 仅当 Xray 处于 active 运行状态时才触发热更新重启，初装部署阶段静默跳过
-[[ $changed -eq 1 ]] && systemctl is-active --quiet xray && systemctl restart xray >/dev/null 2>&1 || true
+# 4. 两个文件全部校验成功后，再统一原子替换正式文件
+changed=0
+for f in "geoip.dat" "geosite.dat"; do
+    if ! cmp -s "$STAGE_DIR/$f" "$SHARE_DIR/$f"; then
+        chmod 644 "$STAGE_DIR/$f"
+        mv -f "$STAGE_DIR/$f" "$SHARE_DIR/$f"
+        changed=1
+    fi
+done
+
+cleanup_stage
+
+# 仅当 Xray 处于 active 运行状态且规则文件发生实质更新时，才触发热更新重启
+if [[ $changed -eq 1 ]] && systemctl is-active --quiet xray; then
+    systemctl restart xray >/dev/null 2>&1 || exit 1
+fi
+
+exit 0
 EOF
     chmod 755 "$SCRIPT_DIR/update-dat.sh"
 
     echo -e "${C_BLUE}--- 路由分流资源热同步 ---${C_RESET}"
-    bash "$SCRIPT_DIR/update-dat.sh" || true
+    if bash "$SCRIPT_DIR/update-dat.sh"; then
+        log_ok "增强版分流规则库 (Loyalsoldier) SHA256 校验与同步成功。"
+    else
+        if [[ -s "$XRAY_SHARE_DIR/geoip.dat" && -s "$XRAY_SHARE_DIR/geosite.dat" ]]; then
+            log_warn "增强版分流规则库本次未完成整体更新，已保留本地原有规则库兜底（后台定时任务将自动重试）。"
+        else
+            log_err "分流规则库下载或校验失败，且本地缺失基础 geoip.dat/geosite.dat，Xray 无法启动！"
+        fi
+    fi
     echo "--------------------------"
 
     cat > /etc/systemd/system/xray-dat.service <<EOF
@@ -946,11 +1072,12 @@ WantedBy=timers.target
 EOF
 
     timer_enable_verify "xray-dat.timer" "分流规则自动更新定时器"
-    log_ok "增强版分流规则库部署与定时更新任务配置完成。"
+    log_ok "分流规则定时更新任务配置完成。"
 }
 
 driver_rules_dat_purge() {
     unit_purge "xray-dat.timer" "xray-dat.service"
+    rm -rf "$XRAY_SHARE_DIR/.staging" 2>/dev/null || true
     rm -f "$SCRIPT_DIR/update-dat.sh" /var/lock/xray-dat.lock
 }
 
@@ -1490,8 +1617,9 @@ workflow_deploy() {
     sys_install_apt_pkgs
     sys_setup_bbr
 
-    # 阶段 4: 停止旧服务并对齐目标模式环境
-    systemctl stop xray hysteria-server hysteria-cert-watcher.path >/dev/null 2>&1 || true
+    # 阶段 4: 停止旧服务及后台定时器并对齐目标模式环境，消除部署期间的并发覆盖竞态
+    systemctl stop xray hysteria-server hysteria-cert-watcher.path \
+                   xray-dat.timer xray-dat.service xray-acme.timer xray-acme.service >/dev/null 2>&1 || true
     command -v nginx >/dev/null 2>&1 && systemctl stop nginx >/dev/null 2>&1 || true
     workflow_align_modes
 
