@@ -1346,40 +1346,50 @@ workflow_get_inputs() {
             log_warn "检测到当前服务器 80 端口已被外部非 Nginx 进程占用！Web 回落与证书签发可能会失败。"
         fi
 
+        # 域名格式校验 + 双栈 DNS 解析一致性检测联合循环
         while true; do
             read -rp "请输入已解析到本服务器的域名 (例如 my.domain.com): " DOMAIN_INPUT
             CTX[domain]=$(echo "$DOMAIN_INPUT" | sed 's|^https\?://||; s|/.*$||' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-            if is_valid_domain "${CTX[domain]}"; then
+            if ! is_valid_domain "${CTX[domain]}"; then
+                log_warn "域名格式无效或为空，请输入合法的域名 (不含 http:// 或路径)。"
+                continue
+            fi
+
+            echo -e "\n${C_BLUE}正在测试域名解析状态 (双栈独立检测)...${C_RESET}"
+            local domain_ipv4="" domain_ipv6=""
+            if command -v jq >/dev/null 2>&1; then
+                domain_ipv4=$(curl -sm 5 -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=${CTX[domain]}&type=A" 2>/dev/null | jq -r '.Answer[]? | select(.type == 1) | .data' 2>/dev/null | head -n1)
+                domain_ipv6=$(curl -sm 5 -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=${CTX[domain]}&type=AAAA" 2>/dev/null | jq -r '.Answer[]? | select(.type == 28) | .data' 2>/dev/null | head -n1)
+            fi
+            [[ -z "$domain_ipv4" ]] && domain_ipv4=$(getent ahostsv4 "${CTX[domain]}" 2>/dev/null | awk '{print $1}' | head -n1)
+            [[ -z "$domain_ipv6" ]] && domain_ipv6=$(getent ahostsv6 "${CTX[domain]}" 2>/dev/null | awk '{print $1}' | grep -v '^::ffff:' | head -n1)
+
+            echo -e "  本机 IPv4 : ${C_YELLOW}${CTX[ipv4]:-"无或超时"}${C_RESET} | 解析 IPv4 : ${C_YELLOW}${domain_ipv4:-"未生效"}${C_RESET}"
+            echo -e "  本机 IPv6 : ${C_YELLOW}${CTX[ipv6]:-"无或超时"}${C_RESET} | 解析 IPv6 : ${C_YELLOW}${domain_ipv6:-"未生效"}${C_RESET}"
+
+            local v4_ok=0 v6_ok=0 dns_conflict=0
+            [[ -n "${CTX[ipv4]}" && "${CTX[ipv4]}" == "$domain_ipv4" ]] && v4_ok=1
+            [[ -n "${CTX[ipv6]}" && "${CTX[ipv6]}" == "$domain_ipv6" ]] && v6_ok=1
+            [[ -n "$domain_ipv4" && "$domain_ipv4" != "${CTX[ipv4]}" ]] && dns_conflict=1
+            [[ -n "$domain_ipv6" && "$domain_ipv6" != "${CTX[ipv6]}" ]] && dns_conflict=1
+
+            if [[ $dns_conflict -eq 1 ]]; then
+                echo -e "${C_RED}  [WARN] 警告：检测到存在与本机 IP 不一致的 A/AAAA 解析记录 (可能开了 CDN 或残留旧 IP 解析)！${C_RESET}\n"
+            elif [[ $v4_ok -eq 1 || $v6_ok -eq 1 ]]; then
+                echo -e "${C_GREEN}  [OK] IP 匹配成功，域名解析已生效。${C_RESET}\n"
+                break
+            else
+                echo -e "${C_RED}  [WARN] 警告：解析 IP 与本机 IP 不匹配 (可能开了 CDN 或尚未生效)。${C_RESET}\n"
+            fi
+
+            local FORCE_CONTINUE=""
+            read -rp "域名解析与本机 IP 不一致，是否重新输入域名？[Y/n, 默认 Y 重输 / 选 n 强行继续]: " FORCE_CONTINUE
+            if [[ "$FORCE_CONTINUE" =~ ^[nN]$ ]]; then
+                log_warn "已选择忽略解析不一致告警并强行继续。\n"
                 break
             fi
-            log_warn "域名格式无效或为空，请输入合法的域名 (不含 http:// 或路径)。"
+            echo ""
         done
-
-        echo -e "\n${C_BLUE}正在测试域名解析状态 (双栈独立检测)...${C_RESET}"
-        local domain_ipv4="" domain_ipv6=""
-        if command -v jq >/dev/null 2>&1; then
-            domain_ipv4=$(curl -sm 5 -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=${CTX[domain]}&type=A" 2>/dev/null | jq -r '.Answer[]? | select(.type == 1) | .data' 2>/dev/null | head -n1)
-            domain_ipv6=$(curl -sm 5 -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=${CTX[domain]}&type=AAAA" 2>/dev/null | jq -r '.Answer[]? | select(.type == 28) | .data' 2>/dev/null | head -n1)
-        fi
-        [[ -z "$domain_ipv4" ]] && domain_ipv4=$(getent ahostsv4 "${CTX[domain]}" 2>/dev/null | awk '{print $1}' | head -n1)
-        [[ -z "$domain_ipv6" ]] && domain_ipv6=$(getent ahostsv6 "${CTX[domain]}" 2>/dev/null | awk '{print $1}' | grep -v '^::ffff:' | head -n1)
-
-        echo -e "  本机 IPv4 : ${C_YELLOW}${CTX[ipv4]:-"无或超时"}${C_RESET} | 解析 IPv4 : ${C_YELLOW}${domain_ipv4:-"未生效"}${C_RESET}"
-        echo -e "  本机 IPv6 : ${C_YELLOW}${CTX[ipv6]:-"无或超时"}${C_RESET} | 解析 IPv6 : ${C_YELLOW}${domain_ipv6:-"未生效"}${C_RESET}"
-
-        local v4_ok=0 v6_ok=0 dns_conflict=0
-        [[ -n "${CTX[ipv4]}" && "${CTX[ipv4]}" == "$domain_ipv4" ]] && v4_ok=1
-        [[ -n "${CTX[ipv6]}" && "${CTX[ipv6]}" == "$domain_ipv6" ]] && v6_ok=1
-        [[ -n "$domain_ipv4" && "$domain_ipv4" != "${CTX[ipv4]}" ]] && dns_conflict=1
-        [[ -n "$domain_ipv6" && "$domain_ipv6" != "${CTX[ipv6]}" ]] && dns_conflict=1
-
-        if [[ $dns_conflict -eq 1 ]]; then
-            echo -e "${C_RED}  [WARN] 警告：检测到存在与本机 IP 不一致的 A/AAAA 解析记录 (可能开了 CDN 或残留旧 IP 解析)！${C_RESET}\n"
-        elif [[ $v4_ok -eq 1 || $v6_ok -eq 1 ]]; then
-            echo -e "${C_GREEN}  [OK] IP 匹配成功，域名解析已生效。${C_RESET}\n"
-        else
-            echo -e "${C_RED}  [WARN] 警告：解析 IP 与本机 IP 不匹配 (可能开了 CDN 或尚未生效)。${C_RESET}\n"
-        fi
 
         workflow_select_port
 
